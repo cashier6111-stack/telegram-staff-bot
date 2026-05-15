@@ -1,3 +1,6 @@
+import subprocess
+subprocess.run(["python", "init_db.py"])
+
 import os
 import telebot
 
