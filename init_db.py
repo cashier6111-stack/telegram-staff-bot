@@ -58,7 +58,25 @@ CREATE TABLE IF NOT EXISTS break_records (
 conn = psycopg2.connect(os.environ["DATABASE_URL"])
 cur = conn.cursor()
 
-cur.execute(SQL)
+cur.execute("""
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS telegram_id BIGINT;
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS real_name TEXT;
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS username TEXT;
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active';
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+""")
 
 conn.commit()
 
