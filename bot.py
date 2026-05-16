@@ -4,48 +4,261 @@ import subprocess
 from datetime import datetime
 
 import telebot
+from telebot import types
 from database import get_db
 
 
-# 自动初始化 database tables
-subprocess.run(["python", "init_db.py"])
+subprocess.run(["python", "init_db.py"], check=False)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
-
-# 防止 webhook / polling 冲突
 bot.remove_webhook()
 time.sleep(3)
 
 
-@bot.message_handler(commands=["start"])
-def start(message):
-    bot.reply_to(message, "✅ Bot is working!")
+RULES = {
+    "Toilet": {"warning": 10, "timeout": 15},
+    "Smoke": {"warning": 6, "timeout": 8},
+    "Meal": {"warning": 31, "timeout": 35},
+}
+
+ROLE_LEVELS = {
+    "user": 1,
+    "leader": 2,
+    "admin": 3,
+}
 
 
-@bot.message_handler(commands=["addstaff"])
-def add_staff(message):
+def get_db_cursor():
+    conn = get_db()
+    return conn, conn.cursor()
+
+
+def get_or_create_company(chat):
+    chat_title = chat.title or str(chat.id)
+
+    conn, cur = get_db_cursor()
+
+    cur.execute(
+        """
+        INSERT INTO companies (chat_title, telegram_chat_id)
+        VALUES (%s, %s)
+        ON CONFLICT (telegram_chat_id)
+        DO UPDATE SET chat_title = EXCLUDED.chat_title
+        RETURNING id
+        """,
+        (chat_title, chat.id)
+    )
+
+    company = cur.fetchone()
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return company["id"]
+
+
+def get_role(company_id, telegram_id):
+    conn, cur = get_db_cursor()
+
+    cur.execute(
+        """
+        SELECT role
+        FROM roles
+        WHERE company_id = %s
+        AND telegram_id = %s
+        """,
+        (company_id, telegram_id)
+    )
+
+    row = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if not row:
+        return "user"
+
+    return row["role"]
+
+
+def has_role(company_id, telegram_id, required_role):
+    current_role = get_role(company_id, telegram_id)
+    return ROLE_LEVELS[current_role] >= ROLE_LEVELS[required_role]
+
+
+def get_status(action_type, duration_minutes):
+    rule = RULES[action_type]
+
+    if duration_minutes > rule["timeout"]:
+        return "Timeout"
+
+    if duration_minutes > rule["warning"]:
+        return "Warning"
+
+    return "Normal"
+
+
+def send_menu(chat_id):
+    markup = types.InlineKeyboardMarkup()
+
+    markup.row(
+        types.InlineKeyboardButton("🚻 Toilet Out", callback_data="toiletout"),
+        types.InlineKeyboardButton("✅ Toilet In", callback_data="toiletin")
+    )
+
+    markup.row(
+        types.InlineKeyboardButton("🚬 Smoke Out", callback_data="smokeout"),
+        types.InlineKeyboardButton("✅ Smoke In", callback_data="smokein")
+    )
+
+    markup.row(
+        types.InlineKeyboardButton("🍱 Meal Out", callback_data="mealout"),
+        types.InlineKeyboardButton("✅ Meal In", callback_data="mealin")
+    )
+
+    markup.row(
+        types.InlineKeyboardButton("❌ Cancel Last", callback_data="cancel")
+    )
+
+    bot.send_message(chat_id, "Attendance Menu", reply_markup=markup)
+
+
+def find_staff(company_id, telegram_id):
+    conn, cur = get_db_cursor()
+
+    cur.execute(
+        """
+        SELECT *
+        FROM staff
+        WHERE company_id = %s
+        AND telegram_id = %s
+        AND is_active = TRUE
+        """,
+        (company_id, telegram_id)
+    )
+
+    staff = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    return staff
+
+
+def get_open_record(company_id, telegram_id, action_type=None):
+    conn, cur = get_db_cursor()
+
+    if action_type:
+        cur.execute(
+            """
+            SELECT *
+            FROM break_records
+            WHERE company_id = %s
+            AND telegram_id = %s
+            AND type = %s
+            AND status = 'Open'
+            ORDER BY out_time DESC
+            LIMIT 1
+            """,
+            (company_id, telegram_id, action_type)
+        )
+    else:
+        cur.execute(
+            """
+            SELECT *
+            FROM break_records
+            WHERE company_id = %s
+            AND telegram_id = %s
+            AND status = 'Open'
+            ORDER BY out_time DESC
+            LIMIT 1
+            """,
+            (company_id, telegram_id)
+        )
+
+    record = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    return record
+
+
+@bot.message_handler(commands=["start", "menu"])
+def show_menu(message):
+    get_or_create_company(message.chat)
+    send_menu(message.chat.id)
+
+
+@bot.message_handler(commands=["myid"])
+def my_id(message):
+    bot.reply_to(message, f"Your Telegram ID:\n{message.from_user.id}")
+
+
+@bot.message_handler(commands=["register"])
+def register(message):
     try:
         parts = message.text.split()
 
         if len(parts) < 3:
-            bot.reply_to(message, "Usage:\n/addstaff STAFF_ID NAME")
+            bot.reply_to(
+                message,
+                "Usage:\n/register STAFF_ID REAL_NAME\n\nExample:\n/register A001 Catherine"
+            )
             return
 
-        staff_id = parts[1]
-        name = " ".join(parts[2:])
+        company_id = get_or_create_company(message.chat)
 
-        conn = get_db()
-        cur = conn.cursor()
+        staff_id = parts[1]
+        real_name = " ".join(parts[2:])
+        telegram_id = message.from_user.id
+        username = message.from_user.username or ""
+
+        conn, cur = get_db_cursor()
 
         cur.execute(
             """
-            INSERT INTO staff (staff_id, name)
-            VALUES (%s, %s)
-            ON CONFLICT (staff_id) DO NOTHING
+            SELECT *
+            FROM staff
+            WHERE company_id = %s
+            AND telegram_id = %s
             """,
-            (staff_id, name)
+            (company_id, telegram_id)
+        )
+
+        if cur.fetchone():
+            bot.reply_to(message, "❌ You already registered.")
+            cur.close()
+            conn.close()
+            return
+
+        cur.execute(
+            """
+            SELECT *
+            FROM staff
+            WHERE company_id = %s
+            AND staff_id = %s
+            """,
+            (company_id, staff_id)
+        )
+
+        if cur.fetchone():
+            bot.reply_to(message, "❌ Staff ID already exists.")
+            cur.close()
+            conn.close()
+            return
+
+        cur.execute(
+            """
+            INSERT INTO staff (
+                company_id, telegram_id, staff_id, real_name, username, status
+            )
+            VALUES (%s, %s, %s, %s, %s, 'Active')
+            """,
+            (company_id, telegram_id, staff_id, real_name, username)
         )
 
         conn.commit()
@@ -54,38 +267,248 @@ def add_staff(message):
 
         bot.reply_to(
             message,
-            f"✅ Staff added\nID: {staff_id}\nName: {name}"
+            f"✅ Registered successfully\nStaff ID: {staff_id}\nName: {real_name}"
         )
+
+        send_menu(message.chat.id)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
 
+def start_action(chat, user, action_type):
+    try:
+        company_id = get_or_create_company(chat)
+        staff = find_staff(company_id, user.id)
+
+        if not staff:
+            bot.send_message(chat.id, "❌ Please register first.\nExample: /register A001 Catherine")
+            return
+
+        existing_open = get_open_record(company_id, user.id)
+
+        if existing_open:
+            bot.send_message(
+                chat.id,
+                f"❌ You already have an open {existing_open['type']} record.\nPlease click In or Cancel first."
+            )
+            return
+
+        now = datetime.now()
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            INSERT INTO break_records (
+                company_id, telegram_id, staff_id, name, type, out_time, status
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, 'Open')
+            """,
+            (
+                company_id,
+                user.id,
+                staff["staff_id"],
+                staff["real_name"],
+                action_type,
+                now
+            )
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.send_message(
+            chat.id,
+            f"✅ {action_type} Out recorded\n"
+            f"👤 {staff['real_name']}\n"
+            f"🕒 {now.strftime('%Y-%m-%d %I:%M:%S %p')}"
+        )
+
+        send_menu(chat.id)
+
+    except Exception as e:
+        bot.send_message(chat.id, f"❌ Error: {e}")
+
+
+def end_action(chat, user, action_type):
+    try:
+        company_id = get_or_create_company(chat)
+        staff = find_staff(company_id, user.id)
+
+        if not staff:
+            bot.send_message(chat.id, "❌ Please register first.")
+            return
+
+        record = get_open_record(company_id, user.id, action_type)
+
+        if not record:
+            bot.send_message(chat.id, f"❌ No open {action_type} record found.")
+            return
+
+        in_time = datetime.now()
+        duration_minutes = round((in_time - record["out_time"]).total_seconds() / 60)
+        status = get_status(action_type, duration_minutes)
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            UPDATE break_records
+            SET in_time = %s,
+                duration = %s,
+                status = %s
+            WHERE id = %s
+            """,
+            (in_time, duration_minutes, status, record["id"])
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        warning_text = ""
+
+        if status == "Warning":
+            warning_text = f"\n⚠️ {action_type} exceeded {RULES[action_type]['warning']} minutes."
+
+        if status == "Timeout":
+            warning_text = f"\n🚨 {action_type} exceeded {RULES[action_type]['timeout']} minutes."
+
+        bot.send_message(
+            chat.id,
+            f"✅ {action_type} In recorded\n"
+            f"👤 {staff['real_name']}\n"
+            f"⏳ Duration: {duration_minutes} min\n"
+            f"📌 Status: {status}"
+            f"{warning_text}"
+        )
+
+        send_menu(chat.id)
+
+    except Exception as e:
+        bot.send_message(chat.id, f"❌ Error: {e}")
+
+
+def cancel_last(chat, user):
+    try:
+        company_id = get_or_create_company(chat)
+        staff = find_staff(company_id, user.id)
+
+        if not staff:
+            bot.send_message(chat.id, "❌ Please register first.")
+            return
+
+        record = get_open_record(company_id, user.id)
+
+        if not record:
+            bot.send_message(chat.id, "❌ No open record found to cancel.")
+            return
+
+        cancel_time = datetime.now()
+        duration_minutes = round((cancel_time - record["out_time"]).total_seconds() / 60)
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            UPDATE break_records
+            SET in_time = %s,
+                duration = %s,
+                status = 'Cancelled'
+            WHERE id = %s
+            """,
+            (cancel_time, duration_minutes, record["id"])
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.send_message(
+            chat.id,
+            f"❌ Last record cancelled\n"
+            f"👤 {staff['real_name']}\n"
+            f"📌 Type: {record['type']}\n"
+            f"⏳ Cancelled after: {duration_minutes} min"
+        )
+
+        send_menu(chat.id)
+
+    except Exception as e:
+        bot.send_message(chat.id, f"❌ Error: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_button(call):
+    chat = call.message.chat
+    user = call.from_user
+
+    if call.data == "toiletout":
+        start_action(chat, user, "Toilet")
+
+    elif call.data == "toiletin":
+        end_action(chat, user, "Toilet")
+
+    elif call.data == "smokeout":
+        start_action(chat, user, "Smoke")
+
+    elif call.data == "smokein":
+        end_action(chat, user, "Smoke")
+
+    elif call.data == "mealout":
+        start_action(chat, user, "Meal")
+
+    elif call.data == "mealin":
+        end_action(chat, user, "Meal")
+
+    elif call.data == "cancel":
+        cancel_last(chat, user)
+
+    bot.answer_callback_query(call.id)
+
+
 @bot.message_handler(commands=["liststaff"])
 def list_staff(message):
     try:
-        conn = get_db()
-        cur = conn.cursor()
+        company_id = get_or_create_company(message.chat)
 
-        cur.execute("""
-            SELECT staff_id, name
+        if not has_role(company_id, message.from_user.id, "leader"):
+            bot.reply_to(message, "❌ Leader or Admin only.")
+            return
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            SELECT staff_id, real_name, username, status
             FROM staff
+            WHERE company_id = %s
             ORDER BY staff_id
-        """)
+            """,
+            (company_id,)
+        )
 
-        staffs = cur.fetchall()
+        rows = cur.fetchall()
 
         cur.close()
         conn.close()
 
-        if not staffs:
+        if not rows:
             bot.reply_to(message, "No staff found.")
             return
 
         text = "👥 Staff List\n\n"
 
-        for s in staffs:
-            text += f"{s['staff_id']} - {s['name']}\n"
+        for row in rows:
+            username = row["username"] or "-"
+            text += (
+                f"ID: {row['staff_id']}\n"
+                f"Name: {row['real_name']}\n"
+                f"Username: @{username}\n"
+                f"Status: {row['status']}\n\n"
+            )
 
         bot.reply_to(message, text)
 
@@ -93,63 +516,75 @@ def list_staff(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
-@bot.message_handler(commands=["record"])
-def add_record(message):
+@bot.message_handler(commands=["editstaff"])
+def edit_staff(message):
     try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "leader"):
+            bot.reply_to(message, "❌ Leader or Admin only.")
+            return
+
         parts = message.text.split()
 
         if len(parts) < 4:
             bot.reply_to(
                 message,
-                "Usage:\n/record STAFF_ID TYPE DURATION\n\nExample:\n/record S001 Toilet 10"
+                "Usage:\n/editstaff OLD_STAFF_ID NEW_STAFF_ID NEW_NAME"
             )
             return
 
-        staff_id = parts[1]
-        action_type = parts[2]
-        duration = int(parts[3])
+        old_staff_id = parts[1]
+        new_staff_id = parts[2]
+        new_name = " ".join(parts[3:])
 
-        if action_type not in ["Toilet", "Smoke", "Meal"]:
-            bot.reply_to(message, "❌ Type must be Toilet, Smoke, or Meal.")
-            return
-
-        conn = get_db()
-        cur = conn.cursor()
+        conn, cur = get_db_cursor()
 
         cur.execute(
             """
-            SELECT name
+            SELECT *
             FROM staff
-            WHERE staff_id = %s
+            WHERE company_id = %s
+            AND staff_id = %s
             """,
-            (staff_id,)
+            (company_id, old_staff_id)
         )
 
-        staff = cur.fetchone()
+        target_staff = cur.fetchone()
 
-        if not staff:
+        if not target_staff:
             bot.reply_to(message, "❌ Staff ID not found.")
             cur.close()
             conn.close()
             return
 
-        name = staff["name"]
+        cur.execute(
+            """
+            SELECT *
+            FROM staff
+            WHERE company_id = %s
+            AND staff_id = %s
+            AND staff_id != %s
+            """,
+            (company_id, new_staff_id, old_staff_id)
+        )
+
+        if cur.fetchone():
+            bot.reply_to(message, "❌ New Staff ID already exists.")
+            cur.close()
+            conn.close()
+            return
 
         cur.execute(
             """
-            INSERT INTO break_records (
-                staff_id, name, type, out_time, duration, status
-            )
-            VALUES (%s, %s, %s, %s, %s, %s)
+            UPDATE staff
+            SET staff_id = %s,
+                real_name = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE company_id = %s
+            AND staff_id = %s
             """,
-            (
-                staff_id,
-                name,
-                action_type,
-                datetime.now(),
-                duration,
-                "Normal"
-            )
+            (new_staff_id, new_name, company_id, old_staff_id)
         )
 
         conn.commit()
@@ -158,12 +593,127 @@ def add_record(message):
 
         bot.reply_to(
             message,
-            f"✅ Record added\n"
-            f"ID: {staff_id}\n"
-            f"Name: {name}\n"
-            f"Type: {action_type}\n"
-            f"Duration: {duration} min"
+            f"✅ Staff updated\n"
+            f"Old ID: {old_staff_id}\n"
+            f"New ID: {new_staff_id}\n"
+            f"Name: {new_name}"
         )
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["addleader"])
+def add_leader(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(message, "Usage:\n/addleader TELEGRAM_ID")
+            return
+
+        telegram_id = int(parts[1])
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            INSERT INTO roles (company_id, telegram_id, role)
+            VALUES (%s, %s, 'leader')
+            ON CONFLICT (company_id, telegram_id)
+            DO UPDATE SET role = 'leader'
+            """,
+            (company_id, telegram_id)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(message, f"✅ Leader added\nTelegram ID: {telegram_id}")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["addadmin"])
+def add_admin(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(message, "Usage:\n/addadmin TELEGRAM_ID")
+            return
+
+        telegram_id = int(parts[1])
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            INSERT INTO roles (company_id, telegram_id, role)
+            VALUES (%s, %s, 'admin')
+            ON CONFLICT (company_id, telegram_id)
+            DO UPDATE SET role = 'admin'
+            """,
+            (company_id, telegram_id)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(message, f"✅ Admin added\nTelegram ID: {telegram_id}")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["removerole"])
+def remove_role(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(message, "Usage:\n/removerole TELEGRAM_ID")
+            return
+
+        telegram_id = int(parts[1])
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            DELETE FROM roles
+            WHERE company_id = %s
+            AND telegram_id = %s
+            """,
+            (company_id, telegram_id)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(message, f"✅ Role removed\nTelegram ID: {telegram_id}")
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -172,15 +722,21 @@ def add_record(message):
 @bot.message_handler(commands=["today"])
 def today_report(message):
     try:
-        conn = get_db()
-        cur = conn.cursor()
+        company_id = get_or_create_company(message.chat)
 
-        cur.execute("""
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
             SELECT name, type, duration, status
             FROM break_records
-            WHERE DATE(out_time) = CURRENT_DATE
+            WHERE company_id = %s
+            AND DATE(out_time) = CURRENT_DATE
+            AND status != 'Open'
             ORDER BY name
-        """)
+            """,
+            (company_id,)
+        )
 
         records = cur.fetchall()
 
@@ -218,9 +774,11 @@ def today_report(message):
 
             if status == "Cancelled":
                 summary[name]["Cancelled Count"] += 1
-            elif status == "Warning":
+
+            if status == "Warning":
                 summary[name]["Warning Count"] += 1
-            elif status == "Timeout":
+
+            if status == "Timeout":
                 summary[name]["Timeout Count"] += 1
 
         report = "📊 Daily Report\n\n"
@@ -242,7 +800,7 @@ def today_report(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
-print("Bot running...")
+print("Bot is running...")
 
 bot.infinity_polling(
     timeout=60,
