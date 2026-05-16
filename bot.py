@@ -6,7 +6,7 @@ import telebot
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -18,7 +18,8 @@ while True:
     try:
         bot.infinity_polling(
             timeout=60,
-            long_polling_timeout=60
+            long_polling_timeout=60,
+            skip_pending=True
         )
 
     except Exception as e:
