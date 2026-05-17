@@ -150,8 +150,8 @@ def send_menu(message, company_id=None, telegram_id=None):
     markup = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         one_time_keyboard=False,
-        row_width=2,
-        selective=True
+        selective=True,
+        row_width=2
     )
 
     role = "user"
@@ -180,9 +180,9 @@ def send_menu(message, company_id=None, telegram_id=None):
         )
 
         markup.add(types.KeyboardButton("❌ Cancel Last"))
-        markup.add(types.KeyboardButton("📊 Today Report"))
 
     if role in ["leader", "admin"]:
+        markup.add(types.KeyboardButton("📊 Today Report"))
         markup.add(types.KeyboardButton("👥 List Staff"))
         markup.add(types.KeyboardButton("✏️ Edit Staff Help"))
         markup.add(types.KeyboardButton("❌ Remove Staff Help"))
@@ -900,6 +900,10 @@ def today_report(message):
     try:
         company_id = get_or_create_company(message.chat)
 
+        if not has_role(company_id, message.from_user.id, "leader"):
+            bot.reply_to(message, "❌ Leader or Admin only.")
+            return
+
         conn, cur = get_db_cursor()
 
         cur.execute(
@@ -1011,6 +1015,12 @@ def handle_buttons(message):
         cancel_last(chat, user)
 
     elif text == "📊 Today Report":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "leader"):
+            bot.send_message(chat.id, "❌ Leader or Admin only.")
+            return
+
         today_report(message)
 
     elif text == "👥 List Staff":
