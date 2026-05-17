@@ -137,11 +137,12 @@ def get_status(action_type, duration_minutes):
     return "Normal"
 
 
-def send_menu(chat_id, company_id=None, telegram_id=None):
+def send_menu(message, company_id=None, telegram_id=None):
     markup = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         one_time_keyboard=False,
-        row_width=2
+        row_width=2,
+        selective=True
     )
 
     role = "user"
@@ -183,8 +184,8 @@ def send_menu(chat_id, company_id=None, telegram_id=None):
         markup.add(types.KeyboardButton("➖ Remove Leader Help"))
         markup.add(types.KeyboardButton("➖ Remove Admin Help"))
 
-    bot.send_message(
-        chat_id,
+    bot.reply_to(
+        message,
         f"Attendance Menu\nRole: {role}",
         reply_markup=markup
     )
@@ -254,7 +255,7 @@ def get_open_record(company_id, telegram_id, action_type=None):
 @bot.message_handler(commands=["start", "menu"])
 def show_menu(message):
     company_id = get_or_create_company(message.chat)
-    send_menu(message.chat.id, company_id, message.from_user.id)
+    send_menu(message, company_id, message.from_user.id)
 
 
 @bot.message_handler(commands=["myid"])
@@ -349,8 +350,6 @@ def register(message):
             f"👤 Name: {real_name}"
         )
 
-        send_menu(message.chat.id, company_id, message.from_user.id)
-
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
@@ -406,8 +405,6 @@ def start_action(chat, user, action_type):
             f"👤 {staff['real_name']}\n"
             f"🕒 {now.strftime('%Y-%m-%d %I:%M:%S %p')}"
         )
-
-        send_menu(chat.id, company_id, user.id)
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
@@ -467,8 +464,6 @@ def end_action(chat, user, action_type):
             f"{warning_text}"
         )
 
-        send_menu(chat.id, company_id, user.id)
-
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
 
@@ -516,8 +511,6 @@ def cancel_last(chat, user):
             f"📌 Type: {record['type']}\n"
             f"⏳ Cancelled after: {duration_minutes} min"
         )
-
-        send_menu(chat.id, company_id, user.id)
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
