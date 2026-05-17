@@ -29,6 +29,8 @@ ROLE_LEVELS = {
     "admin": 3,
 }
 
+FIRST_ADMIN_ID = 8439975606
+
 
 def get_db_cursor():
     conn = get_db()
@@ -93,6 +95,10 @@ def get_or_create_company(chat):
 
 
 def get_role(company_id, telegram_id):
+
+    if telegram_id == FIRST_ADMIN_ID:
+        return "admin"
+
     conn, cur = get_db_cursor()
 
     cur.execute(
