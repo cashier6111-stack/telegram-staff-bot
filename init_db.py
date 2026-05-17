@@ -59,30 +59,6 @@ conn = psycopg2.connect(os.environ["DATABASE_URL"])
 cur = conn.cursor()
 
 cur.execute("""
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS telegram_id BIGINT;
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS name TEXT;
-
-ALTER TABLE staff
-ALTER COLUMN name DROP NOT NULL;
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS real_name TEXT;
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS username TEXT;
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active';
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-
-ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-
 ALTER TABLE break_records
 ADD COLUMN IF NOT EXISTS company_id INTEGER;
 
@@ -109,6 +85,13 @@ ADD COLUMN IF NOT EXISTS duration INTEGER DEFAULT 0;
 
 ALTER TABLE break_records
 ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Open';
+
+ALTER TABLE break_records
+DROP CONSTRAINT IF EXISTS break_records_status_check;
+
+ALTER TABLE break_records
+ADD CONSTRAINT break_records_status_check
+CHECK (status IN ('Open', 'Normal', 'Warning', 'Timeout', 'Cancelled'));
 """)
 
 conn.commit()
