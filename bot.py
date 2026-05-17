@@ -17,6 +17,8 @@ bot.remove_webhook()
 time.sleep(3)
 
 
+FIRST_ADMIN_ID = 8439975606
+
 RULES = {
     "Toilet": {"warning": 10, "timeout": 15},
     "Smoke": {"warning": 6, "timeout": 8},
@@ -28,8 +30,6 @@ ROLE_LEVELS = {
     "leader": 2,
     "admin": 3,
 }
-
-FIRST_ADMIN_ID = 8439975606
 
 
 def get_db_cursor():
@@ -48,8 +48,7 @@ def get_register_example(chat_title):
         return "/register MG001 Cat"
     elif "[NPR77]" in chat_title:
         return "/register NPR001 Cat"
-    else:
-        return "/register STAFF_ID Cat"
+    return "/register STAFF_ID Cat"
 
 
 def is_valid_staff_id(chat_title, staff_id):
@@ -95,7 +94,6 @@ def get_or_create_company(chat):
 
 
 def get_role(company_id, telegram_id):
-
     if telegram_id == FIRST_ADMIN_ID:
         return "admin"
 
@@ -151,37 +149,45 @@ def send_menu(chat_id, company_id=None, telegram_id=None):
     if company_id and telegram_id:
         role = get_role(company_id, telegram_id)
 
-    markup.add(types.KeyboardButton("📝 How To Register"))
     markup.add(types.KeyboardButton("🆔 My Telegram ID"))
 
-    markup.add(
-        types.KeyboardButton("🚻 Toilet Out"),
-        types.KeyboardButton("✅ Toilet In")
-    )
+    if role in ["user", "leader"]:
+        markup.add(types.KeyboardButton("📝 How To Register"))
 
-    markup.add(
-        types.KeyboardButton("🚬 Smoke Out"),
-        types.KeyboardButton("✅ Smoke In")
-    )
+        markup.add(
+            types.KeyboardButton("🚻 Toilet Out"),
+            types.KeyboardButton("✅ Toilet In")
+        )
 
-    markup.add(
-        types.KeyboardButton("🍱 Meal Out"),
-        types.KeyboardButton("✅ Meal In")
-    )
+        markup.add(
+            types.KeyboardButton("🚬 Smoke Out"),
+            types.KeyboardButton("✅ Smoke In")
+        )
 
-    markup.add(types.KeyboardButton("❌ Cancel Last"))
-    markup.add(types.KeyboardButton("📊 Today Report"))
+        markup.add(
+            types.KeyboardButton("🍱 Meal Out"),
+            types.KeyboardButton("✅ Meal In")
+        )
 
-    if ROLE_LEVELS[role] >= ROLE_LEVELS["leader"]:
+        markup.add(types.KeyboardButton("❌ Cancel Last"))
+        markup.add(types.KeyboardButton("📊 Today Report"))
+
+    if role in ["leader", "admin"]:
         markup.add(types.KeyboardButton("👥 List Staff"))
         markup.add(types.KeyboardButton("✏️ Edit Staff Help"))
+        markup.add(types.KeyboardButton("❌ Remove Staff Help"))
 
-    if ROLE_LEVELS[role] >= ROLE_LEVELS["admin"]:
+    if role == "admin":
         markup.add(types.KeyboardButton("➕ Add Leader Help"))
         markup.add(types.KeyboardButton("➕ Add Admin Help"))
-        markup.add(types.KeyboardButton("➖ Remove Role Help"))
+        markup.add(types.KeyboardButton("➖ Remove Leader Help"))
+        markup.add(types.KeyboardButton("➖ Remove Admin Help"))
 
-    bot.send_message(chat_id, f"Attendance Menu\nRole: {role}", reply_markup=markup)
+    bot.send_message(
+        chat_id,
+        f"Attendance Menu\nRole: {role}",
+        reply_markup=markup
+    )
 
 
 def find_staff(company_id, telegram_id):
@@ -652,6 +658,69 @@ def edit_staff(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
+@bot.message_handler(commands=["removestaff"])
+def remove_staff(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "leader"):
+            bot.reply_to(message, "❌ Leader or Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(message, "Usage:\n/removestaff STAFF_ID")
+            return
+
+        staff_id = parts[1].upper()
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            SELECT *
+            FROM staff
+            WHERE company_id = %s
+            AND staff_id = %s
+            """,
+            (company_id, staff_id)
+        )
+
+        staff = cur.fetchone()
+
+        if not staff:
+            bot.reply_to(message, "❌ Staff not found.")
+            cur.close()
+            conn.close()
+            return
+
+        cur.execute(
+            """
+            UPDATE staff
+            SET is_active = FALSE,
+                status = 'Removed'
+            WHERE company_id = %s
+            AND staff_id = %s
+            """,
+            (company_id, staff_id)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(
+            message,
+            f"✅ Staff removed\n\n"
+            f"ID: {staff_id}\n"
+            f"Name: {staff['real_name']}"
+        )
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
 @bot.message_handler(commands=["addleader"])
 def add_leader(message):
     try:
@@ -730,8 +799,8 @@ def add_admin(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
-@bot.message_handler(commands=["removerole"])
-def remove_role(message):
+@bot.message_handler(commands=["removeleader"])
+def remove_leader(message):
     try:
         company_id = get_or_create_company(message.chat)
 
@@ -742,7 +811,7 @@ def remove_role(message):
         parts = message.text.split()
 
         if len(parts) != 2:
-            bot.reply_to(message, "Usage:\n/removerole TELEGRAM_ID")
+            bot.reply_to(message, "Usage:\n/removeleader TELEGRAM_ID")
             return
 
         telegram_id = int(parts[1])
@@ -754,6 +823,7 @@ def remove_role(message):
             DELETE FROM roles
             WHERE company_id = %s
             AND telegram_id = %s
+            AND role = 'leader'
             """,
             (company_id, telegram_id)
         )
@@ -762,7 +832,50 @@ def remove_role(message):
         cur.close()
         conn.close()
 
-        bot.reply_to(message, f"✅ Role removed\nTelegram ID: {telegram_id}")
+        bot.reply_to(message, f"✅ Leader removed\nTelegram ID: {telegram_id}")
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["removeadmin"])
+def remove_admin(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(message, "Usage:\n/removeadmin TELEGRAM_ID")
+            return
+
+        telegram_id = int(parts[1])
+
+        if telegram_id == FIRST_ADMIN_ID:
+            bot.reply_to(message, "❌ Cannot remove first admin.")
+            return
+
+        conn, cur = get_db_cursor()
+
+        cur.execute(
+            """
+            DELETE FROM roles
+            WHERE company_id = %s
+            AND telegram_id = %s
+            AND role = 'admin'
+            """,
+            (company_id, telegram_id)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        bot.reply_to(message, f"✅ Admin removed\nTelegram ID: {telegram_id}")
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -901,7 +1014,22 @@ def handle_buttons(message):
             "✏️ Edit Staff Usage:\n\n"
             "/editstaff OLD_STAFF_ID NEW_STAFF_ID NEW_NAME\n\n"
             "Example:\n"
-            "/editstaff A001 A002 Catherine Tan"
+            "/editstaff 8M001 8M002 Catherine Tan"
+        )
+
+    elif text == "❌ Remove Staff Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "leader"):
+            bot.send_message(chat.id, "❌ Leader or Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "❌ Remove Staff Usage:\n\n"
+            "/removestaff STAFF_ID\n\n"
+            "Example:\n"
+            "/removestaff 8M996"
         )
 
     elif text == "➕ Add Leader Help":
@@ -934,7 +1062,7 @@ def handle_buttons(message):
             "/addadmin 8439975606"
         )
 
-    elif text == "➖ Remove Role Help":
+    elif text == "➖ Remove Leader Help":
         company_id = get_or_create_company(chat)
 
         if not has_role(company_id, user.id, "admin"):
@@ -943,10 +1071,25 @@ def handle_buttons(message):
 
         bot.send_message(
             chat.id,
-            "➖ Remove Role Usage:\n\n"
-            "/removerole TELEGRAM_ID\n\n"
+            "➖ Remove Leader Usage:\n\n"
+            "/removeleader TELEGRAM_ID\n\n"
             "Example:\n"
-            "/removerole 8439975606"
+            "/removeleader 8439975606"
+        )
+
+    elif text == "➖ Remove Admin Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "admin"):
+            bot.send_message(chat.id, "❌ Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "➖ Remove Admin Usage:\n\n"
+            "/removeadmin TELEGRAM_ID\n\n"
+            "Example:\n"
+            "/removeadmin 8439975606"
         )
 
     else:
