@@ -5,7 +5,9 @@ from datetime import datetime
 
 import telebot
 from telebot import types
+
 from database import get_db
+from sync_to_sheet import sync_company_to_sheet
 
 
 subprocess.run(["python", "init_db.py"], check=False)
@@ -35,6 +37,13 @@ ROLE_LEVELS = {
 def get_db_cursor():
     conn = get_db()
     return conn, conn.cursor()
+
+
+def safe_sync(chat):
+    try:
+        sync_company_to_sheet(chat.title or str(chat.id))
+    except Exception as e:
+        print("Google Sheet sync error:", e)
 
 
 def get_register_example(chat_title):
@@ -342,6 +351,8 @@ def register(message):
         cur.close()
         conn.close()
 
+        safe_sync(message.chat)
+
         bot.reply_to(
             message,
             f"✅ Registered Successfully\n\n"
@@ -399,6 +410,8 @@ def start_action(chat, user, action_type):
         cur.close()
         conn.close()
 
+        safe_sync(chat)
+
         bot.send_message(
             chat.id,
             f"✅ {action_type} Out recorded\n"
@@ -446,6 +459,8 @@ def end_action(chat, user, action_type):
         conn.commit()
         cur.close()
         conn.close()
+
+        safe_sync(chat)
 
         warning_text = ""
 
@@ -503,6 +518,8 @@ def cancel_last(chat, user):
         conn.commit()
         cur.close()
         conn.close()
+
+        safe_sync(chat)
 
         bot.send_message(
             chat.id,
@@ -639,6 +656,8 @@ def edit_staff(message):
         cur.close()
         conn.close()
 
+        safe_sync(message.chat)
+
         bot.reply_to(
             message,
             f"✅ Staff updated\n"
@@ -702,6 +721,8 @@ def remove_staff(message):
         conn.commit()
         cur.close()
         conn.close()
+
+        safe_sync(message.chat)
 
         bot.reply_to(
             message,
@@ -996,93 +1017,45 @@ def handle_buttons(message):
         list_staff(message)
 
     elif text == "✏️ Edit Staff Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "leader"):
-            bot.send_message(chat.id, "❌ Leader or Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "✏️ Edit Staff Usage:\n\n"
-            "/editstaff OLD_STAFF_ID NEW_STAFF_ID NEW_NAME\n\n"
-            "Example:\n"
-            "/editstaff 8M001 8M002 Catherine Tan"
+            "/editstaff OLD_STAFF_ID NEW_STAFF_ID NEW_NAME"
         )
 
     elif text == "❌ Remove Staff Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "leader"):
-            bot.send_message(chat.id, "❌ Leader or Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "❌ Remove Staff Usage:\n\n"
-            "/removestaff STAFF_ID\n\n"
-            "Example:\n"
-            "/removestaff 8M996"
+            "/removestaff STAFF_ID"
         )
 
     elif text == "➕ Add Leader Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "admin"):
-            bot.send_message(chat.id, "❌ Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "➕ Add Leader Usage:\n\n"
-            "/addleader TELEGRAM_ID\n\n"
-            "Example:\n"
-            "/addleader 8439975606"
+            "/addleader TELEGRAM_ID"
         )
 
     elif text == "➕ Add Admin Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "admin"):
-            bot.send_message(chat.id, "❌ Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "➕ Add Admin Usage:\n\n"
-            "/addadmin TELEGRAM_ID\n\n"
-            "Example:\n"
-            "/addadmin 8439975606"
+            "/addadmin TELEGRAM_ID"
         )
 
     elif text == "➖ Remove Leader Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "admin"):
-            bot.send_message(chat.id, "❌ Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "➖ Remove Leader Usage:\n\n"
-            "/removeleader TELEGRAM_ID\n\n"
-            "Example:\n"
-            "/removeleader 8439975606"
+            "/removeleader TELEGRAM_ID"
         )
 
     elif text == "➖ Remove Admin Help":
-        company_id = get_or_create_company(chat)
-
-        if not has_role(company_id, user.id, "admin"):
-            bot.send_message(chat.id, "❌ Admin only.")
-            return
-
         bot.send_message(
             chat.id,
             "➖ Remove Admin Usage:\n\n"
-            "/removeadmin TELEGRAM_ID\n\n"
-            "Example:\n"
-            "/removeadmin 8439975606"
+            "/removeadmin TELEGRAM_ID"
         )
 
     else:
