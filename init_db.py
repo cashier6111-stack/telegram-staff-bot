@@ -60,10 +60,16 @@ cur = conn.cursor()
 
 cur.execute("""
 ALTER TABLE staff
-ADD COLUMN IF NOT EXISTS telegram_id BIGINT;
+ADD COLUMN IF NOT EXISTS name TEXT;
+
+ALTER TABLE staff
+ALTER COLUMN name DROP NOT NULL;
 
 ALTER TABLE staff
 ADD COLUMN IF NOT EXISTS real_name TEXT;
+
+ALTER TABLE staff
+ADD COLUMN IF NOT EXISTS telegram_id BIGINT;
 
 ALTER TABLE staff
 ADD COLUMN IF NOT EXISTS username TEXT;
