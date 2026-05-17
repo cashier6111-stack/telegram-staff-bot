@@ -133,14 +133,20 @@ def get_status(action_type, duration_minutes):
     return "Normal"
 
 
-def send_menu(chat_id):
+def send_menu(chat_id, company_id=None, telegram_id=None):
     markup = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         one_time_keyboard=False,
         row_width=2
     )
 
+    role = "user"
+
+    if company_id and telegram_id:
+        role = get_role(company_id, telegram_id)
+
     markup.add(types.KeyboardButton("📝 How To Register"))
+    markup.add(types.KeyboardButton("🆔 My Telegram ID"))
 
     markup.add(
         types.KeyboardButton("🚻 Toilet Out"),
@@ -158,8 +164,18 @@ def send_menu(chat_id):
     )
 
     markup.add(types.KeyboardButton("❌ Cancel Last"))
+    markup.add(types.KeyboardButton("📊 Today Report"))
 
-    bot.send_message(chat_id, "Attendance Menu", reply_markup=markup)
+    if ROLE_LEVELS[role] >= ROLE_LEVELS["leader"]:
+        markup.add(types.KeyboardButton("👥 List Staff"))
+        markup.add(types.KeyboardButton("✏️ Edit Staff Help"))
+
+    if ROLE_LEVELS[role] >= ROLE_LEVELS["admin"]:
+        markup.add(types.KeyboardButton("➕ Add Leader Help"))
+        markup.add(types.KeyboardButton("➕ Add Admin Help"))
+        markup.add(types.KeyboardButton("➖ Remove Role Help"))
+
+    bot.send_message(chat_id, f"Attendance Menu\nRole: {role}", reply_markup=markup)
 
 
 def find_staff(company_id, telegram_id):
@@ -225,13 +241,13 @@ def get_open_record(company_id, telegram_id, action_type=None):
 
 @bot.message_handler(commands=["start", "menu"])
 def show_menu(message):
-    get_or_create_company(message.chat)
-    send_menu(message.chat.id)
+    company_id = get_or_create_company(message.chat)
+    send_menu(message.chat.id, company_id, message.from_user.id)
 
 
 @bot.message_handler(commands=["myid"])
 def my_id(message):
-    bot.reply_to(message, f"Your Telegram ID:\n{message.from_user.id}")
+    bot.reply_to(message, f"🆔 Your Telegram ID:\n{message.from_user.id}")
 
 
 @bot.message_handler(commands=["register"])
@@ -302,7 +318,7 @@ def register(message):
         cur.execute(
             """
             INSERT INTO staff (
-            company_id, telegram_id, staff_id, name, real_name, username, status
+                company_id, telegram_id, staff_id, name, real_name, username, status
             )
             VALUES (%s, %s, %s, %s, %s, %s, 'Active')
             """,
@@ -321,7 +337,7 @@ def register(message):
             f"👤 Name: {real_name}"
         )
 
-        send_menu(message.chat.id)
+        send_menu(message.chat.id, company_id, message.from_user.id)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -379,7 +395,7 @@ def start_action(chat, user, action_type):
             f"🕒 {now.strftime('%Y-%m-%d %I:%M:%S %p')}"
         )
 
-        send_menu(chat.id)
+        send_menu(chat.id, company_id, user.id)
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
@@ -439,7 +455,7 @@ def end_action(chat, user, action_type):
             f"{warning_text}"
         )
 
-        send_menu(chat.id)
+        send_menu(chat.id, company_id, user.id)
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
@@ -489,7 +505,7 @@ def cancel_last(chat, user):
             f"⏳ Cancelled after: {duration_minutes} min"
         )
 
-        send_menu(chat.id)
+        send_menu(chat.id, company_id, user.id)
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
@@ -605,12 +621,13 @@ def edit_staff(message):
             """
             UPDATE staff
             SET staff_id = %s,
+                name = %s,
                 real_name = %s,
                 updated_at = CURRENT_TIMESTAMP
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (new_staff_id, new_name, company_id, old_staff_id)
+            (new_staff_id, new_name, new_name, company_id, old_staff_id)
         )
 
         conn.commit()
@@ -834,11 +851,10 @@ def handle_buttons(message):
 
     if text == "📝 How To Register":
         example = get_register_example(chat.title or "")
-        bot.send_message(
-            chat.id,
-            "📝 Please register using:\n\n"
-            f"{example}"
-        )
+        bot.send_message(chat.id, "📝 Please register using:\n\n" + example)
+
+    elif text == "🆔 My Telegram ID":
+        bot.send_message(chat.id, f"🆔 Your Telegram ID:\n{user.id}")
 
     elif text == "🚻 Toilet Out":
         start_action(chat, user, "Toilet")
@@ -860,6 +876,72 @@ def handle_buttons(message):
 
     elif text == "❌ Cancel Last":
         cancel_last(chat, user)
+
+    elif text == "📊 Today Report":
+        today_report(message)
+
+    elif text == "👥 List Staff":
+        list_staff(message)
+
+    elif text == "✏️ Edit Staff Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "leader"):
+            bot.send_message(chat.id, "❌ Leader or Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "✏️ Edit Staff Usage:\n\n"
+            "/editstaff OLD_STAFF_ID NEW_STAFF_ID NEW_NAME\n\n"
+            "Example:\n"
+            "/editstaff A001 A002 Catherine Tan"
+        )
+
+    elif text == "➕ Add Leader Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "admin"):
+            bot.send_message(chat.id, "❌ Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "➕ Add Leader Usage:\n\n"
+            "/addleader TELEGRAM_ID\n\n"
+            "Example:\n"
+            "/addleader 8439975606"
+        )
+
+    elif text == "➕ Add Admin Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "admin"):
+            bot.send_message(chat.id, "❌ Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "➕ Add Admin Usage:\n\n"
+            "/addadmin TELEGRAM_ID\n\n"
+            "Example:\n"
+            "/addadmin 8439975606"
+        )
+
+    elif text == "➖ Remove Role Help":
+        company_id = get_or_create_company(chat)
+
+        if not has_role(company_id, user.id, "admin"):
+            bot.send_message(chat.id, "❌ Admin only.")
+            return
+
+        bot.send_message(
+            chat.id,
+            "➖ Remove Role Usage:\n\n"
+            "/removerole TELEGRAM_ID\n\n"
+            "Example:\n"
+            "/removerole 8439975606"
+        )
 
     else:
         try:
