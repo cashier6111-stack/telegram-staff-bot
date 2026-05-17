@@ -35,6 +35,38 @@ def get_db_cursor():
     return conn, conn.cursor()
 
 
+def get_register_example(chat_title):
+    if "[8MBET]" in chat_title:
+        return "/register 8M001 Cat"
+    elif "[MJ88]" in chat_title:
+        return "/register MJ001 Cat"
+    elif "[ESEWA12]" in chat_title:
+        return "/register E001 Cat"
+    elif "[MAGAR33]" in chat_title:
+        return "/register MG001 Cat"
+    elif "[NPR77]" in chat_title:
+        return "/register NPR001 Cat"
+    else:
+        return "/register STAFF_ID Cat"
+
+
+def is_valid_staff_id(chat_title, staff_id):
+    staff_id = staff_id.upper()
+
+    if "[8MBET]" in chat_title:
+        return staff_id.startswith("8M")
+    elif "[MJ88]" in chat_title:
+        return staff_id.startswith("MJ")
+    elif "[ESEWA12]" in chat_title:
+        return staff_id.startswith("E")
+    elif "[MAGAR33]" in chat_title:
+        return staff_id.startswith("MG")
+    elif "[NPR77]" in chat_title:
+        return staff_id.startswith("NPR")
+
+    return True
+
+
 def get_or_create_company(chat):
     chat_title = chat.title or str(chat.id)
 
@@ -102,26 +134,30 @@ def get_status(action_type, duration_minutes):
 
 
 def send_menu(chat_id):
-    markup = types.InlineKeyboardMarkup()
-
-    markup.row(
-        types.InlineKeyboardButton("🚻 Toilet Out", callback_data="toiletout"),
-        types.InlineKeyboardButton("✅ Toilet In", callback_data="toiletin")
+    markup = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        row_width=2
     )
 
-    markup.row(
-        types.InlineKeyboardButton("🚬 Smoke Out", callback_data="smokeout"),
-        types.InlineKeyboardButton("✅ Smoke In", callback_data="smokein")
+    markup.add(types.KeyboardButton("📝 How To Register"))
+
+    markup.add(
+        types.KeyboardButton("🚻 Toilet Out"),
+        types.KeyboardButton("✅ Toilet In")
     )
 
-    markup.row(
-        types.InlineKeyboardButton("🍱 Meal Out", callback_data="mealout"),
-        types.InlineKeyboardButton("✅ Meal In", callback_data="mealin")
+    markup.add(
+        types.KeyboardButton("🚬 Smoke Out"),
+        types.KeyboardButton("✅ Smoke In")
     )
 
-    markup.row(
-        types.InlineKeyboardButton("❌ Cancel Last", callback_data="cancel")
+    markup.add(
+        types.KeyboardButton("🍱 Meal Out"),
+        types.KeyboardButton("✅ Meal In")
     )
+
+    markup.add(types.KeyboardButton("❌ Cancel Last"))
 
     bot.send_message(chat_id, "Attendance Menu", reply_markup=markup)
 
@@ -202,20 +238,32 @@ def my_id(message):
 def register(message):
     try:
         parts = message.text.split()
+        chat_title = message.chat.title or ""
+        example = get_register_example(chat_title)
 
         if len(parts) < 3:
             bot.reply_to(
                 message,
-                "Usage:\n/register STAFF_ID REAL_NAME\n\nExample:\n/register A001 Catherine"
+                "Usage:\n"
+                "/register STAFF_ID REAL_NAME\n\n"
+                f"Example:\n{example}"
             )
             return
 
         company_id = get_or_create_company(message.chat)
 
-        staff_id = parts[1]
+        staff_id = parts[1].upper()
         real_name = " ".join(parts[2:])
         telegram_id = message.from_user.id
         username = message.from_user.username or ""
+
+        if not is_valid_staff_id(chat_title, staff_id):
+            bot.reply_to(
+                message,
+                "❌ Invalid Staff ID format for this company.\n\n"
+                f"Example:\n{example}"
+            )
+            return
 
         conn, cur = get_db_cursor()
 
@@ -254,11 +302,11 @@ def register(message):
         cur.execute(
             """
             INSERT INTO staff (
-                company_id, telegram_id, staff_id, real_name, username, status
+            company_id, telegram_id, staff_id, name, real_name, username, status
             )
-            VALUES (%s, %s, %s, %s, %s, 'Active')
+            VALUES (%s, %s, %s, %s, %s, %s, 'Active')
             """,
-            (company_id, telegram_id, staff_id, real_name, username)
+            (company_id, telegram_id, staff_id, real_name, real_name, username)
         )
 
         conn.commit()
@@ -267,7 +315,10 @@ def register(message):
 
         bot.reply_to(
             message,
-            f"✅ Registered successfully\nStaff ID: {staff_id}\nName: {real_name}"
+            f"✅ Registered Successfully\n\n"
+            f"🏢 Company: {chat_title}\n"
+            f"🆔 Staff ID: {staff_id}\n"
+            f"👤 Name: {real_name}"
         )
 
         send_menu(message.chat.id)
@@ -282,7 +333,8 @@ def start_action(chat, user, action_type):
         staff = find_staff(company_id, user.id)
 
         if not staff:
-            bot.send_message(chat.id, "❌ Please register first.\nExample: /register A001 Catherine")
+            example = get_register_example(chat.title or "")
+            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
             return
 
         existing_open = get_open_record(company_id, user.id)
@@ -290,7 +342,8 @@ def start_action(chat, user, action_type):
         if existing_open:
             bot.send_message(
                 chat.id,
-                f"❌ You already have an open {existing_open['type']} record.\nPlease click In or Cancel first."
+                f"❌ You already have an open {existing_open['type']} record.\n"
+                f"Please click In or Cancel first."
             )
             return
 
@@ -338,7 +391,8 @@ def end_action(chat, user, action_type):
         staff = find_staff(company_id, user.id)
 
         if not staff:
-            bot.send_message(chat.id, "❌ Please register first.")
+            example = get_register_example(chat.title or "")
+            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
             return
 
         record = get_open_record(company_id, user.id, action_type)
@@ -397,7 +451,8 @@ def cancel_last(chat, user):
         staff = find_staff(company_id, user.id)
 
         if not staff:
-            bot.send_message(chat.id, "❌ Please register first.")
+            example = get_register_example(chat.title or "")
+            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
             return
 
         record = get_open_record(company_id, user.id)
@@ -438,35 +493,6 @@ def cancel_last(chat, user):
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
-
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_button(call):
-    chat = call.message.chat
-    user = call.from_user
-
-    if call.data == "toiletout":
-        start_action(chat, user, "Toilet")
-
-    elif call.data == "toiletin":
-        end_action(chat, user, "Toilet")
-
-    elif call.data == "smokeout":
-        start_action(chat, user, "Smoke")
-
-    elif call.data == "smokein":
-        end_action(chat, user, "Smoke")
-
-    elif call.data == "mealout":
-        start_action(chat, user, "Meal")
-
-    elif call.data == "mealin":
-        end_action(chat, user, "Meal")
-
-    elif call.data == "cancel":
-        cancel_last(chat, user)
-
-    bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(commands=["liststaff"])
@@ -534,8 +560,8 @@ def edit_staff(message):
             )
             return
 
-        old_staff_id = parts[1]
-        new_staff_id = parts[2]
+        old_staff_id = parts[1].upper()
+        new_staff_id = parts[2].upper()
         new_name = " ".join(parts[3:])
 
         conn, cur = get_db_cursor()
@@ -798,6 +824,48 @@ def today_report(message):
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(func=lambda message: True)
+def handle_buttons(message):
+    text = message.text or ""
+    chat = message.chat
+    user = message.from_user
+
+    if text == "📝 How To Register":
+        example = get_register_example(chat.title or "")
+        bot.send_message(
+            chat.id,
+            "📝 Please register using:\n\n"
+            f"{example}"
+        )
+
+    elif text == "🚻 Toilet Out":
+        start_action(chat, user, "Toilet")
+
+    elif text == "✅ Toilet In":
+        end_action(chat, user, "Toilet")
+
+    elif text == "🚬 Smoke Out":
+        start_action(chat, user, "Smoke")
+
+    elif text == "✅ Smoke In":
+        end_action(chat, user, "Smoke")
+
+    elif text == "🍱 Meal Out":
+        start_action(chat, user, "Meal")
+
+    elif text == "✅ Meal In":
+        end_action(chat, user, "Meal")
+
+    elif text == "❌ Cancel Last":
+        cancel_last(chat, user)
+
+    else:
+        try:
+            bot.delete_message(chat.id, message.message_id)
+        except Exception:
+            pass
 
 
 print("Bot is running...")
