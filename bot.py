@@ -7,7 +7,7 @@ import telebot
 from telebot import types
 
 from database import get_db
-from sync_to_sheet import sync_company_to_sheet
+from sync_to_sheet import sync_staff_to_sheet, sync_record_to_sheet
 
 
 subprocess.run(["python", "init_db.py"], check=False)
@@ -39,11 +39,18 @@ def get_db_cursor():
     return conn, conn.cursor()
 
 
-def safe_sync(chat):
+def safe_sync_staff(chat):
     try:
-        sync_company_to_sheet(chat.title or str(chat.id))
+        sync_staff_to_sheet(chat.title or str(chat.id))
     except Exception as e:
-        print("Google Sheet sync error:", e)
+        print("Google Sheet staff sync error:", e)
+
+
+def safe_sync_record(chat, record_id):
+    try:
+        sync_record_to_sheet(chat.title or str(chat.id), record_id)
+    except Exception as e:
+        print("Google Sheet record sync error:", e)
 
 
 def get_register_example(chat_title):
@@ -315,7 +322,9 @@ def register(message):
             (company_id, telegram_id)
         )
 
-        if cur.fetchone():
+        existing_user = cur.fetchone()
+
+        if existing_user and existing_user["is_active"]:
             bot.reply_to(message, "❌ You already registered.")
             cur.close()
             conn.close()
@@ -327,6 +336,7 @@ def register(message):
             FROM staff
             WHERE company_id = %s
             AND staff_id = %s
+            AND is_active = TRUE
             """,
             (company_id, staff_id)
         )
@@ -337,21 +347,45 @@ def register(message):
             conn.close()
             return
 
-        cur.execute(
-            """
-            INSERT INTO staff (
-                company_id, telegram_id, staff_id, name, real_name, username, status
+        if existing_user and not existing_user["is_active"]:
+            cur.execute(
+                """
+                UPDATE staff
+                SET staff_id = %s,
+                    name = %s,
+                    real_name = %s,
+                    username = %s,
+                    status = 'Active',
+                    is_active = TRUE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE company_id = %s
+                AND telegram_id = %s
+                """,
+                (
+                    staff_id,
+                    real_name,
+                    real_name,
+                    username,
+                    company_id,
+                    telegram_id
+                )
             )
-            VALUES (%s, %s, %s, %s, %s, %s, 'Active')
-            """,
-            (company_id, telegram_id, staff_id, real_name, real_name, username)
-        )
+        else:
+            cur.execute(
+                """
+                INSERT INTO staff (
+                    company_id, telegram_id, staff_id, name, real_name, username, status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'Active')
+                """,
+                (company_id, telegram_id, staff_id, real_name, real_name, username)
+            )
 
         conn.commit()
         cur.close()
         conn.close()
 
-        safe_sync(message.chat)
+        safe_sync_staff(message.chat)
 
         bot.reply_to(
             message,
@@ -395,6 +429,7 @@ def start_action(chat, user, action_type):
                 company_id, telegram_id, staff_id, name, type, out_time, status
             )
             VALUES (%s, %s, %s, %s, %s, %s, 'Open')
+            RETURNING id
             """,
             (
                 company_id,
@@ -406,11 +441,14 @@ def start_action(chat, user, action_type):
             )
         )
 
+        new_record = cur.fetchone()
+        record_id = new_record["id"]
+
         conn.commit()
         cur.close()
         conn.close()
 
-        safe_sync(chat)
+        safe_sync_record(chat, record_id)
 
         bot.send_message(
             chat.id,
@@ -460,7 +498,7 @@ def end_action(chat, user, action_type):
         cur.close()
         conn.close()
 
-        safe_sync(chat)
+        safe_sync_record(chat, record["id"])
 
         warning_text = ""
 
@@ -519,7 +557,7 @@ def cancel_last(chat, user):
         cur.close()
         conn.close()
 
-        safe_sync(chat)
+        safe_sync_record(chat, record["id"])
 
         bot.send_message(
             chat.id,
@@ -656,7 +694,7 @@ def edit_staff(message):
         cur.close()
         conn.close()
 
-        safe_sync(message.chat)
+        safe_sync_staff(message.chat)
 
         bot.reply_to(
             message,
@@ -722,7 +760,7 @@ def remove_staff(message):
         cur.close()
         conn.close()
 
-        safe_sync(message.chat)
+        safe_sync_staff(message.chat)
 
         bot.reply_to(
             message,
@@ -1069,10 +1107,7 @@ def handle_buttons(message):
         )
 
     else:
-        try:
-            bot.delete_message(chat.id, message.message_id)
-        except Exception:
-            pass
+        pass
 
 
 print("Bot is running...")

@@ -13,7 +13,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-
 COMPANY_SHEETS = {
     "[8MBET] Attendance": "SHEET_8MBET",
     "[MJ88] Attendance": "SHEET_MJ88",
@@ -52,7 +51,6 @@ def get_cycle_period(today=None):
         else:
             end_year = year
             end_month = month + 1
-
     else:
         end_year = year
         end_month = month
@@ -95,15 +93,38 @@ def get_or_create_sheet(spreadsheet, tab_name, headers):
     return worksheet
 
 
-def sync_company_to_sheet(chat_title):
+def open_company_spreadsheet(chat_title):
     spreadsheet_id = get_spreadsheet_id(chat_title)
 
     if not spreadsheet_id:
         print(f"No spreadsheet ID for {chat_title}")
-        return
+        return None
 
     gc = get_gspread_client()
-    spreadsheet = gc.open_by_key(spreadsheet_id)
+    return gc.open_by_key(spreadsheet_id)
+
+
+def format_time(value):
+    if not value:
+        return ""
+    return str(value)
+
+
+def find_row_by_id(worksheet, record_id):
+    values = worksheet.get_all_values()
+
+    for index, row in enumerate(values, start=1):
+        if row and row[0] == str(record_id):
+            return index
+
+    return None
+
+
+def sync_staff_to_sheet(chat_title):
+    spreadsheet = open_company_spreadsheet(chat_title)
+
+    if not spreadsheet:
+        return
 
     conn = get_db()
     cur = conn.cursor()
@@ -122,12 +143,9 @@ def sync_company_to_sheet(chat_title):
     if not company:
         cur.close()
         conn.close()
-        print(f"No company found for {chat_title}")
         return
 
     company_id = company["id"]
-
-    start_date, end_date, tab_name = get_cycle_period()
 
     cur.execute(
         """
@@ -149,9 +167,58 @@ def sync_company_to_sheet(chat_title):
 
     staff_rows = cur.fetchall()
 
+    cur.close()
+    conn.close()
+
+    headers = [
+        "Telegram ID",
+        "Staff ID",
+        "Real Name",
+        "Username",
+        "Status",
+        "Active",
+        "Created At",
+        "Updated At"
+    ]
+
+    worksheet = get_or_create_sheet(spreadsheet, "Staff", headers)
+
+    worksheet.clear()
+    worksheet.append_row(headers)
+
+    values = []
+
+    for row in staff_rows:
+        values.append([
+            row["telegram_id"],
+            row["staff_id"],
+            row["real_name"],
+            row["username"] or "",
+            row["status"],
+            row["is_active"],
+            format_time(row["created_at"]),
+            format_time(row["updated_at"])
+        ])
+
+    if values:
+        worksheet.append_rows(values)
+
+    print(f"Staff synced for {chat_title}")
+
+
+def sync_record_to_sheet(chat_title, record_id):
+    spreadsheet = open_company_spreadsheet(chat_title)
+
+    if not spreadsheet:
+        return
+
+    conn = get_db()
+    cur = conn.cursor()
+
     cur.execute(
         """
         SELECT
+            id,
             telegram_id,
             staff_id,
             name,
@@ -162,81 +229,23 @@ def sync_company_to_sheet(chat_title):
             status,
             created_at
         FROM break_records
-        WHERE company_id = %s
-        AND out_time::date >= %s
-        AND out_time::date <= %s
-        ORDER BY out_time
+        WHERE id = %s
         """,
-        (company_id, start_date, end_date)
+        (record_id,)
     )
 
-    record_rows = cur.fetchall()
+    row = cur.fetchone()
 
     cur.close()
     conn.close()
 
-    staff_sheet = get_or_create_sheet(
-        spreadsheet,
-        "Staff",
-        [
-            "Telegram ID",
-            "Staff ID",
-            "Real Name",
-            "Username",
-            "Status",
-            "Active",
-            "Created At",
-            "Updated At"
-        ]
-    )
+    if not row:
+        return
 
-    staff_sheet.clear()
-    staff_sheet.append_row([
-        "Telegram ID",
-        "Staff ID",
-        "Real Name",
-        "Username",
-        "Status",
-        "Active",
-        "Created At",
-        "Updated At"
-    ])
+    _, _, tab_name = get_cycle_period(row["out_time"].date())
 
-    staff_values = []
-
-    for row in staff_rows:
-        staff_values.append([
-            row["telegram_id"],
-            row["staff_id"],
-            row["real_name"],
-            row["username"] or "",
-            row["status"],
-            row["is_active"],
-            str(row["created_at"]),
-            str(row["updated_at"])
-        ])
-
-    if staff_values:
-        staff_sheet.append_rows(staff_values)
-
-    record_sheet = get_or_create_sheet(
-        spreadsheet,
-        tab_name,
-        [
-            "Telegram ID",
-            "Staff ID",
-            "Name",
-            "Type",
-            "Out Time",
-            "In Time",
-            "Duration",
-            "Status",
-            "Created At"
-        ]
-    )
-
-    record_sheet.clear()
-    record_sheet.append_row([
+    headers = [
+        "Record ID",
         "Telegram ID",
         "Staff ID",
         "Name",
@@ -246,32 +255,28 @@ def sync_company_to_sheet(chat_title):
         "Duration",
         "Status",
         "Created At"
-    ])
+    ]
 
-    record_values = []
+    worksheet = get_or_create_sheet(spreadsheet, tab_name, headers)
 
-    for row in record_rows:
-        record_values.append([
-            row["telegram_id"],
-            row["staff_id"],
-            row["name"],
-            row["type"],
-            str(row["out_time"]),
-            str(row["in_time"]) if row["in_time"] else "",
-            row["duration"],
-            row["status"],
-            str(row["created_at"])
-        ])
+    values = [
+        row["id"],
+        row["telegram_id"],
+        row["staff_id"],
+        row["name"],
+        row["type"],
+        format_time(row["out_time"]),
+        format_time(row["in_time"]),
+        row["duration"],
+        row["status"],
+        format_time(row["created_at"])
+    ]
 
-    if record_values:
-        record_sheet.append_rows(record_values)
+    target_row = find_row_by_id(worksheet, row["id"])
 
-    print(f"Synced {chat_title} to {tab_name}")
+    if target_row:
+        worksheet.update(f"A{target_row}:J{target_row}", [values])
+    else:
+        worksheet.append_row(values)
 
-
-def sync_all_companies():
-    for chat_title in COMPANY_SHEETS.keys():
-        try:
-            sync_company_to_sheet(chat_title)
-        except Exception as e:
-            print(f"Sync error for {chat_title}: {e}")
+    print(f"Record {record_id} synced to {tab_name}")
