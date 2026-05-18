@@ -1,7 +1,8 @@
 import os
 import time
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import telebot
 from telebot import types
@@ -19,6 +20,8 @@ bot.remove_webhook()
 time.sleep(3)
 
 
+KL_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+
 FIRST_ADMIN_ID = 8439975606
 
 RULES = {
@@ -32,6 +35,16 @@ ROLE_LEVELS = {
     "leader": 2,
     "admin": 3,
 }
+
+
+def now_kl():
+    return datetime.now(KL_TZ).replace(tzinfo=None)
+
+
+def format_time(dt):
+    if not dt:
+        return ""
+    return dt.strftime("%Y-%m-%d %I:%M:%S %p")
 
 
 def get_db_cursor():
@@ -357,7 +370,7 @@ def register(message):
                     username = %s,
                     status = 'Active',
                     is_active = TRUE,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = %s
                 WHERE company_id = %s
                 AND telegram_id = %s
                 """,
@@ -366,6 +379,7 @@ def register(message):
                     real_name,
                     real_name,
                     username,
+                    now_kl(),
                     company_id,
                     telegram_id
                 )
@@ -374,11 +388,20 @@ def register(message):
             cur.execute(
                 """
                 INSERT INTO staff (
-                    company_id, telegram_id, staff_id, name, real_name, username, status
+                    company_id, telegram_id, staff_id, name, real_name, username, status, created_at, updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'Active')
+                VALUES (%s, %s, %s, %s, %s, %s, 'Active', %s, %s)
                 """,
-                (company_id, telegram_id, staff_id, real_name, real_name, username)
+                (
+                    company_id,
+                    telegram_id,
+                    staff_id,
+                    real_name,
+                    real_name,
+                    username,
+                    now_kl(),
+                    now_kl()
+                )
             )
 
         conn.commit()
@@ -419,16 +442,16 @@ def start_action(chat, user, action_type):
             )
             return
 
-        now = datetime.now()
+        now = now_kl()
 
         conn, cur = get_db_cursor()
 
         cur.execute(
             """
             INSERT INTO break_records (
-                company_id, telegram_id, staff_id, name, type, out_time, status
+                company_id, telegram_id, staff_id, name, type, out_time, status, created_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, 'Open')
+            VALUES (%s, %s, %s, %s, %s, %s, 'Open', %s)
             RETURNING id
             """,
             (
@@ -437,6 +460,7 @@ def start_action(chat, user, action_type):
                 staff["staff_id"],
                 staff["real_name"],
                 action_type,
+                now,
                 now
             )
         )
@@ -454,7 +478,7 @@ def start_action(chat, user, action_type):
             chat.id,
             f"✅ {action_type} Out recorded\n"
             f"👤 {staff['real_name']}\n"
-            f"🕒 {now.strftime('%Y-%m-%d %I:%M:%S %p')}"
+            f"🕒 {format_time(now)}"
         )
 
     except Exception as e:
@@ -477,7 +501,7 @@ def end_action(chat, user, action_type):
             bot.send_message(chat.id, f"❌ No open {action_type} record found.")
             return
 
-        in_time = datetime.now()
+        in_time = now_kl()
         duration_minutes = round((in_time - record["out_time"]).total_seconds() / 60)
         status = get_status(action_type, duration_minutes)
 
@@ -537,7 +561,7 @@ def cancel_last(chat, user):
             bot.send_message(chat.id, "❌ No open record found to cancel.")
             return
 
-        cancel_time = datetime.now()
+        cancel_time = now_kl()
         duration_minutes = round((cancel_time - record["out_time"]).total_seconds() / 60)
 
         conn, cur = get_db_cursor()
@@ -683,11 +707,11 @@ def edit_staff(message):
             SET staff_id = %s,
                 name = %s,
                 real_name = %s,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = %s
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (new_staff_id, new_name, new_name, company_id, old_staff_id)
+            (new_staff_id, new_name, new_name, now_kl(), company_id, old_staff_id)
         )
 
         conn.commit()
@@ -749,11 +773,12 @@ def remove_staff(message):
             """
             UPDATE staff
             SET is_active = FALSE,
-                status = 'Removed'
+                status = 'Removed',
+                updated_at = %s
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (company_id, staff_id)
+            (now_kl(), company_id, staff_id)
         )
 
         conn.commit()
@@ -942,6 +967,9 @@ def today_report(message):
             bot.reply_to(message, "❌ Leader or Admin only.")
             return
 
+        today_start = now_kl().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
+
         conn, cur = get_db_cursor()
 
         cur.execute(
@@ -949,11 +977,12 @@ def today_report(message):
             SELECT name, type, duration, status
             FROM break_records
             WHERE company_id = %s
-            AND DATE(out_time) = CURRENT_DATE
+            AND out_time >= %s
+            AND out_time < %s
             AND status != 'Open'
             ORDER BY name
             """,
-            (company_id,)
+            (company_id, today_start, tomorrow_start)
         )
 
         records = cur.fetchall()
