@@ -22,6 +22,16 @@ COMPANY_SHEETS = {
 }
 
 
+def today_kh():
+    return date.today()
+
+
+def format_time(value):
+    if not value:
+        return ""
+    return value.strftime("%Y-%m-%d %I:%M:%S %p")
+
+
 def get_gspread_client():
     credentials_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
     service_account_info = json.loads(credentials_json)
@@ -36,7 +46,7 @@ def get_gspread_client():
 
 def get_cycle_period(today=None):
     if today is None:
-        today = date.today()
+        today = today_kh()
 
     year = today.year
     month = today.month
@@ -79,6 +89,17 @@ def get_spreadsheet_id(chat_title):
     return os.environ.get(variable_name)
 
 
+def open_company_spreadsheet(chat_title):
+    spreadsheet_id = get_spreadsheet_id(chat_title)
+
+    if not spreadsheet_id:
+        print(f"No spreadsheet ID for {chat_title}")
+        return None
+
+    gc = get_gspread_client()
+    return gc.open_by_key(spreadsheet_id)
+
+
 def get_or_create_sheet(spreadsheet, tab_name, headers):
     try:
         worksheet = spreadsheet.worksheet(tab_name)
@@ -91,23 +112,6 @@ def get_or_create_sheet(spreadsheet, tab_name, headers):
         worksheet.append_row(headers)
 
     return worksheet
-
-
-def open_company_spreadsheet(chat_title):
-    spreadsheet_id = get_spreadsheet_id(chat_title)
-
-    if not spreadsheet_id:
-        print(f"No spreadsheet ID for {chat_title}")
-        return None
-
-    gc = get_gspread_client()
-    return gc.open_by_key(spreadsheet_id)
-
-
-def format_time(value):
-    if not value:
-        return ""
-    return str(value)
 
 
 def find_row_by_id(worksheet, record_id):
