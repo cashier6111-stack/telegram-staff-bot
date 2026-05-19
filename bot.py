@@ -16,17 +16,27 @@ TOKEN = os.environ["BOT_TOKEN"]
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 bot.remove_webhook()
+
+bot.set_my_commands([
+    types.BotCommand("start", "Open attendance menu"),
+    types.BotCommand("menu", "Show shortcut buttons"),
+    types.BotCommand("myid", "Get your Telegram ID"),
+])
+
 time.sleep(3)
 
 
 KH_TZ = timezone(timedelta(hours=7))
+
 FIRST_ADMIN_ID = 8439975606
+
 
 RULES = {
     "Toilet": {"warning": 10, "timeout": 15},
     "Smoke": {"warning": 6, "timeout": 8},
     "Meal": {"warning": 31, "timeout": 35},
 }
+
 
 ROLE_LEVELS = {
     "user": 1,
@@ -42,6 +52,7 @@ def now_kh():
 def format_time(dt):
     if not dt:
         return ""
+
     return dt.strftime("%Y-%m-%d %I:%M:%S %p")
 
 
@@ -67,14 +78,19 @@ def safe_sync_record(chat, record_id):
 def get_register_example(chat_title):
     if "[8MBET]" in chat_title:
         return "/register 8M001 Cat"
+
     if "[MJ88]" in chat_title:
         return "/register MJ001 Cat"
+
     if "[ESEWA12]" in chat_title:
         return "/register E001 Cat"
+
     if "[MAGAR33]" in chat_title:
         return "/register MG001 Cat"
+
     if "[NPR77]" in chat_title:
         return "/register NPR001 Cat"
+
     return "/register STAFF_ID Cat"
 
 
@@ -83,12 +99,16 @@ def is_valid_staff_id(chat_title, staff_id):
 
     if "[8MBET]" in chat_title:
         return staff_id.startswith("8M")
+
     if "[MJ88]" in chat_title:
         return staff_id.startswith("MJ")
+
     if "[ESEWA12]" in chat_title:
         return staff_id.startswith("E")
+
     if "[MAGAR33]" in chat_title:
         return staff_id.startswith("MG")
+
     if "[NPR77]" in chat_title:
         return staff_id.startswith("NPR")
 
@@ -112,6 +132,7 @@ def get_or_create_company(chat):
     )
 
     company = cur.fetchone()
+
     conn.commit()
 
     cur.close()
@@ -149,8 +170,82 @@ def get_role(company_id, telegram_id):
 
 def has_role(company_id, telegram_id, required_role):
     current_role = get_role(company_id, telegram_id)
+
     return ROLE_LEVELS[current_role] >= ROLE_LEVELS[required_role]
 
+
+VALID_COMMANDS = [
+    "/start",
+    "/menu",
+    "/myid",
+    "/register",
+    "/today",
+    "/liststaff",
+    "/editstaff",
+    "/removestaff",
+    "/addleader",
+    "/addadmin",
+    "/removeleader",
+    "/removeadmin",
+]
+
+
+VALID_BUTTONS = [
+    "📝 How To Register",
+    "🆔 My Telegram ID",
+    "🚻 Toilet Out",
+    "✅ Toilet In",
+    "🚬 Smoke Out",
+    "✅ Smoke In",
+    "🍱 Meal Out",
+    "✅ Meal In",
+    "❌ Cancel Last",
+    "📊 Today Report",
+    "👥 List Staff",
+    "✏️ Edit Staff Help",
+    "❌ Remove Staff Help",
+    "➕ Add Leader Help",
+    "➕ Add Admin Help",
+    "➖ Remove Leader Help",
+    "➖ Remove Admin Help",
+]
+
+
+def is_valid_command(text):
+    if not text:
+        return False
+
+    first_word = text.split()[0]
+
+    for command in VALID_COMMANDS:
+        if first_word == command or first_word.startswith(command + "@"):
+            return True
+
+    return False
+
+
+def delete_non_admin_noise(message):
+    try:
+        text = message.text or ""
+
+        if text in VALID_BUTTONS:
+            return
+
+        if is_valid_command(text):
+            return
+
+        company_id = get_or_create_company(message.chat)
+
+        if has_role(company_id, message.from_user.id, "admin"):
+            return
+
+        bot.delete_message(
+            message.chat.id,
+            message.message_id
+        )
+
+    except Exception as e:
+        print("Delete message error:", e)
 
 def get_status(action_type, duration_minutes):
     rule = RULES[action_type]
@@ -168,6 +263,7 @@ def send_menu(message, company_id=None, telegram_id=None):
     markup = types.ReplyKeyboardMarkup(
         resize_keyboard=True,
         one_time_keyboard=False,
+        is_persistent=True,
         selective=True,
         row_width=2
     )
@@ -257,6 +353,7 @@ def get_open_record(company_id, telegram_id, action_type=None):
             """,
             (company_id, telegram_id, action_type)
         )
+
     else:
         cur.execute(
             """
@@ -282,19 +379,29 @@ def get_open_record(company_id, telegram_id, action_type=None):
 @bot.message_handler(commands=["start", "menu"])
 def show_menu(message):
     company_id = get_or_create_company(message.chat)
-    send_menu(message, company_id, message.from_user.id)
+
+    send_menu(
+        message,
+        company_id,
+        message.from_user.id
+    )
 
 
 @bot.message_handler(commands=["myid"])
 def my_id(message):
-    bot.reply_to(message, f"🆔 Your Telegram ID:\n{message.from_user.id}")
+    bot.reply_to(
+        message,
+        f"🆔 Your Telegram ID:\n{message.from_user.id}"
+    )
 
 
 @bot.message_handler(commands=["register"])
 def register(message):
     try:
         parts = message.text.split()
+
         chat_title = message.chat.title or ""
+
         example = get_register_example(chat_title)
 
         if len(parts) < 3:
@@ -308,14 +415,17 @@ def register(message):
         company_id = get_or_create_company(message.chat)
 
         staff_id = parts[1].upper()
+
         real_name = " ".join(parts[2:])
+
         telegram_id = message.from_user.id
+
         username = message.from_user.username or ""
 
         if not is_valid_staff_id(chat_title, staff_id):
             bot.reply_to(
                 message,
-                "❌ Invalid Staff ID format for this company.\n\n"
+                "❌ Invalid Staff ID format.\n\n"
                 f"Example:\n{example}"
             )
             return
@@ -335,9 +445,14 @@ def register(message):
         existing_user = cur.fetchone()
 
         if existing_user and existing_user["is_active"]:
-            bot.reply_to(message, "❌ You already registered.")
+            bot.reply_to(
+                message,
+                "❌ You already registered."
+            )
+
             cur.close()
             conn.close()
+
             return
 
         cur.execute(
@@ -352,9 +467,14 @@ def register(message):
         )
 
         if cur.fetchone():
-            bot.reply_to(message, "❌ Staff ID already exists.")
+            bot.reply_to(
+                message,
+                "❌ Staff ID already exists."
+            )
+
             cur.close()
             conn.close()
+
             return
 
         current_time = now_kh()
@@ -383,12 +503,20 @@ def register(message):
                     telegram_id
                 )
             )
+
         else:
             cur.execute(
                 """
                 INSERT INTO staff (
-                    company_id, telegram_id, staff_id, name, real_name,
-                    username, status, created_at, updated_at
+                    company_id,
+                    telegram_id,
+                    staff_id,
+                    name,
+                    real_name,
+                    username,
+                    status,
+                    created_at,
+                    updated_at
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, 'Active', %s, %s)
                 """,
@@ -405,6 +533,7 @@ def register(message):
             )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -425,11 +554,17 @@ def register(message):
 def start_action(chat, user, action_type):
     try:
         company_id = get_or_create_company(chat)
+
         staff = find_staff(company_id, user.id)
 
         if not staff:
             example = get_register_example(chat.title or "")
-            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
+
+            bot.send_message(
+                chat.id,
+                f"❌ Please register first.\n\nExample:\n{example}"
+            )
+
             return
 
         existing_open = get_open_record(company_id, user.id)
@@ -440,6 +575,7 @@ def start_action(chat, user, action_type):
                 f"❌ You already have an open {existing_open['type']} record.\n"
                 "Please click In or Cancel first."
             )
+
             return
 
         now = now_kh()
@@ -449,8 +585,14 @@ def start_action(chat, user, action_type):
         cur.execute(
             """
             INSERT INTO break_records (
-                company_id, telegram_id, staff_id, name, type,
-                out_time, status, created_at
+                company_id,
+                telegram_id,
+                staff_id,
+                name,
+                type,
+                out_time,
+                status,
+                created_at
             )
             VALUES (%s, %s, %s, %s, %s, %s, 'Open', %s)
             RETURNING id
@@ -467,9 +609,11 @@ def start_action(chat, user, action_type):
         )
 
         new_record = cur.fetchone()
+
         record_id = new_record["id"]
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -485,24 +629,39 @@ def start_action(chat, user, action_type):
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
 
+
 def end_action(chat, user, action_type):
     try:
         company_id = get_or_create_company(chat)
+
         staff = find_staff(company_id, user.id)
 
         if not staff:
             example = get_register_example(chat.title or "")
-            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
+
+            bot.send_message(
+                chat.id,
+                f"❌ Please register first.\n\nExample:\n{example}"
+            )
+
             return
 
         record = get_open_record(company_id, user.id, action_type)
 
         if not record:
-            bot.send_message(chat.id, f"❌ No open {action_type} record found.")
+            bot.send_message(
+                chat.id,
+                f"❌ No open {action_type} record found."
+            )
+
             return
 
         in_time = now_kh()
-        duration_minutes = round((in_time - record["out_time"]).total_seconds() / 60)
+
+        duration_minutes = round(
+            (in_time - record["out_time"]).total_seconds() / 60
+        )
+
         status = get_status(action_type, duration_minutes)
 
         conn, cur = get_db_cursor()
@@ -515,10 +674,16 @@ def end_action(chat, user, action_type):
                 status = %s
             WHERE id = %s
             """,
-            (in_time, duration_minutes, status, record["id"])
+            (
+                in_time,
+                duration_minutes,
+                status,
+                record["id"]
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -527,10 +692,16 @@ def end_action(chat, user, action_type):
         warning_text = ""
 
         if status == "Warning":
-            warning_text = f"\n⚠️ {action_type} exceeded {RULES[action_type]['warning']} minutes."
+            warning_text = (
+                f"\n⚠️ {action_type} exceeded "
+                f"{RULES[action_type]['warning']} minutes."
+            )
 
         if status == "Timeout":
-            warning_text = f"\n🚨 {action_type} exceeded {RULES[action_type]['timeout']} minutes."
+            warning_text = (
+                f"\n🚨 {action_type} exceeded "
+                f"{RULES[action_type]['timeout']} minutes."
+            )
 
         bot.send_message(
             chat.id,
@@ -548,21 +719,34 @@ def end_action(chat, user, action_type):
 def cancel_last(chat, user):
     try:
         company_id = get_or_create_company(chat)
+
         staff = find_staff(company_id, user.id)
 
         if not staff:
             example = get_register_example(chat.title or "")
-            bot.send_message(chat.id, f"❌ Please register first.\n\nExample:\n{example}")
+
+            bot.send_message(
+                chat.id,
+                f"❌ Please register first.\n\nExample:\n{example}"
+            )
+
             return
 
         record = get_open_record(company_id, user.id)
 
         if not record:
-            bot.send_message(chat.id, "❌ No open record found to cancel.")
+            bot.send_message(
+                chat.id,
+                "❌ No open record found to cancel."
+            )
+
             return
 
         cancel_time = now_kh()
-        duration_minutes = round((cancel_time - record["out_time"]).total_seconds() / 60)
+
+        duration_minutes = round(
+            (cancel_time - record["out_time"]).total_seconds() / 60
+        )
 
         conn, cur = get_db_cursor()
 
@@ -574,10 +758,15 @@ def cancel_last(chat, user):
                 status = 'Cancelled'
             WHERE id = %s
             """,
-            (cancel_time, duration_minutes, record["id"])
+            (
+                cancel_time,
+                duration_minutes,
+                record["id"]
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -629,6 +818,7 @@ def list_staff(message):
 
         for row in rows:
             username = row["username"] or "-"
+
             text += (
                 f"ID: {row['staff_id']}\n"
                 f"Name: {row['real_name']}\n"
@@ -673,7 +863,10 @@ def edit_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (company_id, old_staff_id)
+            (
+                company_id,
+                old_staff_id
+            )
         )
 
         target_staff = cur.fetchone()
@@ -692,7 +885,11 @@ def edit_staff(message):
             AND staff_id = %s
             AND staff_id != %s
             """,
-            (company_id, new_staff_id, old_staff_id)
+            (
+                company_id,
+                new_staff_id,
+                old_staff_id
+            )
         )
 
         if cur.fetchone():
@@ -711,10 +908,18 @@ def edit_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (new_staff_id, new_name, new_name, now_kh(), company_id, old_staff_id)
+            (
+                new_staff_id,
+                new_name,
+                new_name,
+                now_kh(),
+                company_id,
+                old_staff_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -758,7 +963,10 @@ def remove_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (company_id, staff_id)
+            (
+                company_id,
+                staff_id
+            )
         )
 
         staff = cur.fetchone()
@@ -778,10 +986,15 @@ def remove_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (now_kh(), company_id, staff_id)
+            (
+                now_kh(),
+                company_id,
+                staff_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
@@ -824,14 +1037,21 @@ def add_leader(message):
             ON CONFLICT (company_id, telegram_id)
             DO UPDATE SET role = 'leader'
             """,
-            (company_id, telegram_id)
+            (
+                company_id,
+                telegram_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
-        bot.reply_to(message, f"✅ Leader added\nTelegram ID: {telegram_id}")
+        bot.reply_to(
+            message,
+            f"✅ Leader added\nTelegram ID: {telegram_id}"
+        )
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -863,14 +1083,21 @@ def add_admin(message):
             ON CONFLICT (company_id, telegram_id)
             DO UPDATE SET role = 'admin'
             """,
-            (company_id, telegram_id)
+            (
+                company_id,
+                telegram_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
-        bot.reply_to(message, f"✅ Admin added\nTelegram ID: {telegram_id}")
+        bot.reply_to(
+            message,
+            f"✅ Admin added\nTelegram ID: {telegram_id}"
+        )
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -902,14 +1129,21 @@ def remove_leader(message):
             AND telegram_id = %s
             AND role = 'leader'
             """,
-            (company_id, telegram_id)
+            (
+                company_id,
+                telegram_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
-        bot.reply_to(message, f"✅ Leader removed\nTelegram ID: {telegram_id}")
+        bot.reply_to(
+            message,
+            f"✅ Leader removed\nTelegram ID: {telegram_id}"
+        )
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -933,7 +1167,10 @@ def remove_admin(message):
         telegram_id = int(parts[1])
 
         if telegram_id == FIRST_ADMIN_ID:
-            bot.reply_to(message, "❌ Cannot remove first admin.")
+            bot.reply_to(
+                message,
+                "❌ Cannot remove first admin."
+            )
             return
 
         conn, cur = get_db_cursor()
@@ -945,14 +1182,21 @@ def remove_admin(message):
             AND telegram_id = %s
             AND role = 'admin'
             """,
-            (company_id, telegram_id)
+            (
+                company_id,
+                telegram_id
+            )
         )
 
         conn.commit()
+
         cur.close()
         conn.close()
 
-        bot.reply_to(message, f"✅ Admin removed\nTelegram ID: {telegram_id}")
+        bot.reply_to(
+            message,
+            f"✅ Admin removed\nTelegram ID: {telegram_id}"
+        )
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -967,7 +1211,13 @@ def today_report(message):
             bot.reply_to(message, "❌ Leader or Admin only.")
             return
 
-        today_start = now_kh().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start = now_kh().replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
         tomorrow_start = today_start + timedelta(days=1)
 
         conn, cur = get_db_cursor()
@@ -982,7 +1232,11 @@ def today_report(message):
             AND status != 'Open'
             ORDER BY name
             """,
-            (company_id, today_start, tomorrow_start)
+            (
+                company_id,
+                today_start,
+                tomorrow_start
+            )
         )
 
         records = cur.fetchall()
@@ -1050,15 +1304,24 @@ def today_report(message):
 @bot.message_handler(func=lambda message: True)
 def handle_buttons(message):
     text = message.text or ""
+
     chat = message.chat
+
     user = message.from_user
 
     if text == "📝 How To Register":
         example = get_register_example(chat.title or "")
-        bot.send_message(chat.id, "📝 Please register using:\n\n" + example)
+
+        bot.send_message(
+            chat.id,
+            "📝 Please register using:\n\n" + example
+        )
 
     elif text == "🆔 My Telegram ID":
-        bot.send_message(chat.id, f"🆔 Your Telegram ID:\n{user.id}")
+        bot.send_message(
+            chat.id,
+            f"🆔 Your Telegram ID:\n{user.id}"
+        )
 
     elif text == "🚻 Toilet Out":
         start_action(chat, user, "Toilet")
@@ -1085,7 +1348,10 @@ def handle_buttons(message):
         company_id = get_or_create_company(chat)
 
         if not has_role(company_id, user.id, "leader"):
-            bot.send_message(chat.id, "❌ Leader or Admin only.")
+            bot.send_message(
+                chat.id,
+                "❌ Leader or Admin only."
+            )
             return
 
         today_report(message)
@@ -1136,7 +1402,7 @@ def handle_buttons(message):
         )
 
     else:
-        pass
+        delete_non_admin_noise(message)
 
 
 print("Bot is running...")

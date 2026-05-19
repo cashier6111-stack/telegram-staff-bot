@@ -118,7 +118,7 @@ def find_row_by_id(worksheet, record_id):
     values = worksheet.get_all_values()
 
     for index, row in enumerate(values, start=1):
-        if row and row[0] == str(record_id):
+        if len(row) >= 10 and row[9] == str(record_id):
             return index
 
     return None
@@ -249,7 +249,6 @@ def sync_record_to_sheet(chat_title, record_id):
     _, _, tab_name = get_cycle_period(row["out_time"].date())
 
     headers = [
-        "Record ID",
         "Telegram ID",
         "Staff ID",
         "Name",
@@ -258,13 +257,13 @@ def sync_record_to_sheet(chat_title, record_id):
         "In Time",
         "Duration",
         "Status",
-        "Created At"
+        "Created At",
+        "Record ID"
     ]
 
     worksheet = get_or_create_sheet(spreadsheet, tab_name, headers)
 
     values = [
-        row["id"],
         row["telegram_id"],
         row["staff_id"],
         row["name"],
@@ -273,7 +272,8 @@ def sync_record_to_sheet(chat_title, record_id):
         format_time(row["in_time"]),
         row["duration"],
         row["status"],
-        format_time(row["created_at"])
+        format_time(row["created_at"]),
+        row["id"]
     ]
 
     target_row = find_row_by_id(worksheet, row["id"])
@@ -282,5 +282,10 @@ def sync_record_to_sheet(chat_title, record_id):
         worksheet.update(f"A{target_row}:J{target_row}", [values])
     else:
         worksheet.append_row(values)
+
+    try:
+        worksheet.hide_columns(10)
+    except Exception:
+        pass
 
     print(f"Record {record_id} synced to {tab_name}")
