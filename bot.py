@@ -90,6 +90,9 @@ def get_register_example(chat_title):
 
     if "[NPR77]" in chat_title:
         return "/register NPR001 Cat"
+    
+    if "[CASHIER]" in chat_title:
+        return "/register C001 Cat"
 
     return "/register STAFF_ID Cat"
 
@@ -111,6 +114,9 @@ def is_valid_staff_id(chat_title, staff_id):
 
     if "[NPR77]" in chat_title:
         return staff_id.startswith("NPR")
+    
+    if "[CASHIER]" in chat_title:
+        return staff_id.startswith("C")
 
     return True
 

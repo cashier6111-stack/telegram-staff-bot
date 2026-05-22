@@ -19,6 +19,7 @@ COMPANY_SHEETS = {
     "[ESEWA12] Attendance": "SHEET_ESEWA12",
     "[MAGAR33] Attendance": "SHEET_MAGAR33",
     "[NPR77] Attendance": "SHEET_NPR77",
+    "[CASHIER] Attendance": "SHEET_CASHIER",
 }
 
 
