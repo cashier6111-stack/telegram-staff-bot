@@ -301,7 +301,7 @@ def send_menu(message, company_id=None, telegram_id=None):
         resize_keyboard=True,
         one_time_keyboard=False,
         is_persistent=True,
-        selective=True
+        selective=True,
         row_width=2
     )
 
