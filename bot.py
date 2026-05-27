@@ -1,5 +1,6 @@
 import os
 import time
+import threading
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -26,7 +27,11 @@ bot.set_my_commands([
 time.sleep(3)
 
 
+# Cambodia UTC+7
 KH_TZ = timezone(timedelta(hours=7))
+
+# Nepal UTC+5:45
+NP_TZ = timezone(timedelta(hours=5, minutes=45))
 
 FIRST_ADMIN_ID = 8439975606
 
@@ -49,11 +54,36 @@ def now_kh():
     return datetime.now(KH_TZ).replace(tzinfo=None)
 
 
+def now_np():
+    return datetime.now(NP_TZ).replace(tzinfo=None)
+
+
 def format_time(dt):
     if not dt:
         return ""
 
     return dt.strftime("%Y-%m-%d %I:%M:%S %p")
+
+
+def send_long_message(chat_id, text, limit=3500):
+    if not text:
+        return
+
+    while len(text) > limit:
+        split_index = text.rfind("\n", 0, limit)
+
+        if split_index == -1:
+            split_index = limit
+
+        chunk = text[:split_index].strip()
+
+        if chunk:
+            bot.send_message(chat_id, chunk)
+
+        text = text[split_index:].strip()
+
+    if text:
+        bot.send_message(chat_id, text)
 
 
 def get_db_cursor():
@@ -90,7 +120,7 @@ def get_register_example(chat_title):
 
     if "[NPR77]" in chat_title:
         return "/register NPR001 Cat"
-    
+
     if "[CASHIER]" in chat_title:
         return "/register C001 Cat"
 
@@ -114,7 +144,7 @@ def is_valid_staff_id(chat_title, staff_id):
 
     if "[NPR77]" in chat_title:
         return staff_id.startswith("NPR")
-    
+
     if "[CASHIER]" in chat_title:
         return staff_id.startswith("C")
 
@@ -145,7 +175,6 @@ def get_or_create_company(chat):
     conn.close()
 
     return company["id"]
-
 
 def get_role(company_id, telegram_id):
     if telegram_id == FIRST_ADMIN_ID:
@@ -186,6 +215,7 @@ VALID_COMMANDS = [
     "/myid",
     "/register",
     "/today",
+    "/report",
     "/liststaff",
     "/editstaff",
     "/removestaff",
@@ -253,6 +283,7 @@ def delete_non_admin_noise(message):
     except Exception as e:
         print("Delete message error:", e)
 
+
 def get_status(action_type, duration_minutes):
     rule = RULES[action_type]
 
@@ -270,7 +301,7 @@ def send_menu(message, company_id=None, telegram_id=None):
         resize_keyboard=True,
         one_time_keyboard=False,
         is_persistent=True,
-        selective=True,
+        selective=True
         row_width=2
     )
 
@@ -380,7 +411,6 @@ def get_open_record(company_id, telegram_id, action_type=None):
     conn.close()
 
     return record
-
 
 @bot.message_handler(commands=["start", "menu"])
 def show_menu(message):
@@ -832,7 +862,7 @@ def list_staff(message):
                 f"Status: {row['status']}\n\n"
             )
 
-        bot.reply_to(message, text)
+        send_long_message(message.chat.id, text)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
@@ -869,10 +899,7 @@ def edit_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (
-                company_id,
-                old_staff_id
-            )
+            (company_id, old_staff_id)
         )
 
         target_staff = cur.fetchone()
@@ -891,11 +918,7 @@ def edit_staff(message):
             AND staff_id = %s
             AND staff_id != %s
             """,
-            (
-                company_id,
-                new_staff_id,
-                old_staff_id
-            )
+            (company_id, new_staff_id, old_staff_id)
         )
 
         if cur.fetchone():
@@ -969,10 +992,7 @@ def remove_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (
-                company_id,
-                staff_id
-            )
+            (company_id, staff_id)
         )
 
         staff = cur.fetchone()
@@ -992,11 +1012,7 @@ def remove_staff(message):
             WHERE company_id = %s
             AND staff_id = %s
             """,
-            (
-                now_kh(),
-                company_id,
-                staff_id
-            )
+            (now_kh(), company_id, staff_id)
         )
 
         conn.commit()
@@ -1043,10 +1059,7 @@ def add_leader(message):
             ON CONFLICT (company_id, telegram_id)
             DO UPDATE SET role = 'leader'
             """,
-            (
-                company_id,
-                telegram_id
-            )
+            (company_id, telegram_id)
         )
 
         conn.commit()
@@ -1089,10 +1102,7 @@ def add_admin(message):
             ON CONFLICT (company_id, telegram_id)
             DO UPDATE SET role = 'admin'
             """,
-            (
-                company_id,
-                telegram_id
-            )
+            (company_id, telegram_id)
         )
 
         conn.commit()
@@ -1135,10 +1145,7 @@ def remove_leader(message):
             AND telegram_id = %s
             AND role = 'leader'
             """,
-            (
-                company_id,
-                telegram_id
-            )
+            (company_id, telegram_id)
         )
 
         conn.commit()
@@ -1188,10 +1195,7 @@ def remove_admin(message):
             AND telegram_id = %s
             AND role = 'admin'
             """,
-            (
-                company_id,
-                telegram_id
-            )
+            (company_id, telegram_id)
         )
 
         conn.commit()
@@ -1208,6 +1212,89 @@ def remove_admin(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
+def build_daily_report(company_id, target_date):
+    day_start = target_date.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0
+    )
+
+    next_day = day_start + timedelta(days=1)
+
+    conn, cur = get_db_cursor()
+
+    cur.execute(
+        """
+        SELECT name, type, duration, status
+        FROM break_records
+        WHERE company_id = %s
+        AND out_time >= %s
+        AND out_time < %s
+        AND status != 'Open'
+        ORDER BY name
+        """,
+        (company_id, day_start, next_day)
+    )
+
+    records = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    if not records:
+        return f"📊 Daily Report {target_date.strftime('%Y-%m-%d')}\n\nNo records."
+
+    summary = {}
+
+    for row in records:
+        name = row["name"]
+        action_type = row["type"]
+        duration = row["duration"] or 0
+        status = row["status"]
+
+        if name not in summary:
+            summary[name] = {
+                "Toilet": 0,
+                "Smoke": 0,
+                "Meal": 0,
+                "Toilet Count": 0,
+                "Smoke Count": 0,
+                "Meal Count": 0,
+                "Cancelled Count": 0,
+                "Warning Count": 0,
+                "Timeout Count": 0,
+            }
+
+        if action_type in ["Toilet", "Smoke", "Meal"]:
+            summary[name][action_type] += duration
+            summary[name][f"{action_type} Count"] += 1
+
+        if status == "Cancelled":
+            summary[name]["Cancelled Count"] += 1
+
+        if status == "Warning":
+            summary[name]["Warning Count"] += 1
+
+        if status == "Timeout":
+            summary[name]["Timeout Count"] += 1
+
+    report = f"📊 Daily Report {target_date.strftime('%Y-%m-%d')}\n\n"
+
+    for name, data in summary.items():
+        report += (
+            f"👤 {name}\n"
+            f"🚻 Toilet: {data['Toilet']} min / {data['Toilet Count']} times\n"
+            f"🚬 Smoke: {data['Smoke']} min / {data['Smoke Count']} times\n"
+            f"🍱 Meal: {data['Meal']} min / {data['Meal Count']} times\n"
+            f"⚠️ Warning: {data['Warning Count']} times\n"
+            f"🚨 Timeout: {data['Timeout Count']} times\n"
+            f"❌ Cancelled: {data['Cancelled Count']} times\n\n"
+        )
+
+    return report
+
+
 @bot.message_handler(commands=["today"])
 def today_report(message):
     try:
@@ -1217,94 +1304,95 @@ def today_report(message):
             bot.reply_to(message, "❌ Leader or Admin only.")
             return
 
-        today_start = now_kh().replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0
-        )
+        report = build_daily_report(company_id, now_kh())
 
-        tomorrow_start = today_start + timedelta(days=1)
-
-        conn, cur = get_db_cursor()
-
-        cur.execute(
-            """
-            SELECT name, type, duration, status
-            FROM break_records
-            WHERE company_id = %s
-            AND out_time >= %s
-            AND out_time < %s
-            AND status != 'Open'
-            ORDER BY name
-            """,
-            (
-                company_id,
-                today_start,
-                tomorrow_start
-            )
-        )
-
-        records = cur.fetchall()
-
-        cur.close()
-        conn.close()
-
-        if not records:
-            bot.reply_to(message, "No records for today.")
-            return
-
-        summary = {}
-
-        for row in records:
-            name = row["name"]
-            action_type = row["type"]
-            duration = row["duration"] or 0
-            status = row["status"]
-
-            if name not in summary:
-                summary[name] = {
-                    "Toilet": 0,
-                    "Smoke": 0,
-                    "Meal": 0,
-                    "Toilet Count": 0,
-                    "Smoke Count": 0,
-                    "Meal Count": 0,
-                    "Cancelled Count": 0,
-                    "Warning Count": 0,
-                    "Timeout Count": 0,
-                }
-
-            if action_type in ["Toilet", "Smoke", "Meal"]:
-                summary[name][action_type] += duration
-                summary[name][f"{action_type} Count"] += 1
-
-            if status == "Cancelled":
-                summary[name]["Cancelled Count"] += 1
-
-            if status == "Warning":
-                summary[name]["Warning Count"] += 1
-
-            if status == "Timeout":
-                summary[name]["Timeout Count"] += 1
-
-        report = "📊 Daily Report\n\n"
-
-        for name, data in summary.items():
-            report += (
-                f"👤 {name}\n"
-                f"🚻 Toilet: {data['Toilet']} min / {data['Toilet Count']} times\n"
-                f"🚬 Smoke: {data['Smoke']} min / {data['Smoke Count']} times\n"
-                f"🍱 Meal: {data['Meal']} min / {data['Meal Count']} times\n"
-                f"⚠️ Warning: {data['Warning Count']} times\n"
-                f"🚨 Timeout: {data['Timeout Count']} times\n"
-                f"❌ Cancelled: {data['Cancelled Count']} times\n\n"
-            )
-
-        bot.reply_to(message, report)
+        send_long_message(message.chat.id, report)
 
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["report"])
+def report_by_date(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "leader"):
+            bot.reply_to(message, "❌ Leader or Admin only.")
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 2:
+            bot.reply_to(
+                message,
+                "Usage:\n/report YYYY-MM-DD\n\nExample:\n/report 2026-05-26"
+            )
+            return
+
+        target_date = datetime.strptime(parts[1], "%Y-%m-%d")
+
+        report = build_daily_report(company_id, target_date)
+
+        send_long_message(message.chat.id, report)
+
+    except ValueError:
+        bot.reply_to(
+            message,
+            "❌ Invalid date format.\nUse:\n/report YYYY-MM-DD"
+        )
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+
+def auto_daily_report_loop():
+    last_sent_date = None
+
+    while True:
+        try:
+            np_now = now_np()
+
+            if np_now.hour == 0 and np_now.minute == 0:
+                report_date = np_now - timedelta(days=1)
+
+                if last_sent_date != report_date.date():
+                    conn, cur = get_db_cursor()
+
+                    cur.execute(
+                        """
+                        SELECT id, chat_title, telegram_chat_id
+                        FROM companies
+                        """
+                    )
+
+                    companies = cur.fetchall()
+
+                    cur.close()
+                    conn.close()
+
+                    for company in companies:
+                        try:
+                            report = build_daily_report(
+                                company["id"],
+                                report_date
+                            )
+
+                            send_long_message(
+                                company["telegram_chat_id"],
+                                report
+                            )
+
+                        except Exception as e:
+                            print("Auto report send error:", e)
+
+                    last_sent_date = report_date.date()
+
+            time.sleep(30)
+
+        except Exception as e:
+            print("Auto daily report loop error:", e)
+            time.sleep(60)
 
 
 @bot.message_handler(func=lambda message: True)
@@ -1312,7 +1400,6 @@ def handle_buttons(message):
     text = message.text or ""
 
     chat = message.chat
-
     user = message.from_user
 
     if text == "📝 How To Register":
@@ -1360,7 +1447,9 @@ def handle_buttons(message):
             )
             return
 
-        today_report(message)
+        report = build_daily_report(company_id, now_kh())
+
+        send_long_message(chat.id, report)
 
     elif text == "👥 List Staff":
         list_staff(message)
@@ -1412,6 +1501,11 @@ def handle_buttons(message):
 
 
 print("Bot is running...")
+
+threading.Thread(
+    target=auto_daily_report_loop,
+    daemon=True
+).start()
 
 bot.infinity_polling(
     timeout=60,
