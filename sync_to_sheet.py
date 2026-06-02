@@ -114,17 +114,6 @@ def get_or_create_sheet(spreadsheet, tab_name, headers):
 
     return worksheet
 
-
-def find_row_by_id(worksheet, record_id):
-    values = worksheet.get_all_values()
-
-    for index, row in enumerate(values, start=1):
-        if len(row) >= 10 and row[9] == str(record_id):
-            return index
-
-    return None
-
-
 def sync_staff_to_sheet(chat_title):
     spreadsheet = open_company_spreadsheet(chat_title)
 
@@ -232,7 +221,8 @@ def sync_record_to_sheet(chat_title, record_id):
             in_time,
             duration,
             status,
-            created_at
+            created_at,
+            sheet_row_number
         FROM break_records
         WHERE id = %s
         """,
@@ -241,10 +231,9 @@ def sync_record_to_sheet(chat_title, record_id):
 
     row = cur.fetchone()
 
-    cur.close()
-    conn.close()
-
     if not row:
+        cur.close()
+        conn.close()
         return
 
     _, _, tab_name = get_cycle_period(row["out_time"].date())
@@ -277,12 +266,29 @@ def sync_record_to_sheet(chat_title, record_id):
         row["id"]
     ]
 
-    target_row = find_row_by_id(worksheet, row["id"])
-
-    if target_row:
-        worksheet.update(f"A{target_row}:J{target_row}", [values])
+    if row["sheet_row_number"]:
+        worksheet.update(
+            f"A{row['sheet_row_number']}:J{row['sheet_row_number']}",
+            [values]
+        )
     else:
         worksheet.append_row(values)
+
+        new_row_number = len(worksheet.col_values(10))
+
+        cur.execute(
+            """
+            UPDATE break_records
+            SET sheet_row_number = %s
+            WHERE id = %s
+            """,
+            (new_row_number, record_id)
+        )
+
+        conn.commit()
+
+    cur.close()
+    conn.close()
 
     try:
         worksheet.hide_columns(10)

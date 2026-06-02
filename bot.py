@@ -22,6 +22,8 @@ bot.set_my_commands([
     types.BotCommand("start", "Open attendance menu"),
     types.BotCommand("menu", "Show shortcut buttons"),
     types.BotCommand("myid", "Get your Telegram ID"),
+    types.BotCommand("today", "Show today report"),
+    types.BotCommand("report", "Show report by date"),
 ])
 
 time.sleep(3)
@@ -29,9 +31,6 @@ time.sleep(3)
 
 # Cambodia UTC+7
 KH_TZ = timezone(timedelta(hours=7))
-
-# Nepal UTC+5:45
-NP_TZ = timezone(timedelta(hours=5, minutes=45))
 
 FIRST_ADMIN_ID = 8439975606
 
@@ -52,11 +51,6 @@ ROLE_LEVELS = {
 
 def now_kh():
     return datetime.now(KH_TZ).replace(tzinfo=None)
-
-
-def now_np():
-    return datetime.now(NP_TZ).replace(tzinfo=None)
-
 
 def format_time(dt):
     if not dt:
@@ -1351,12 +1345,17 @@ def auto_daily_report_loop():
 
     while True:
         try:
-            np_now = now_np()
+            kh_now = now_kh()
 
-            if np_now.hour == 0 and np_now.minute == 0:
-                report_date = np_now - timedelta(days=1)
+            print("Cambodia time:", kh_now)
+
+            if kh_now.hour == 0 and kh_now.minute <= 5:
+                report_date = kh_now - timedelta(days=1)
 
                 if last_sent_date != report_date.date():
+
+                    print("Sending auto report...")
+
                     conn, cur = get_db_cursor()
 
                     cur.execute(
