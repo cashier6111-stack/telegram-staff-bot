@@ -41,6 +41,20 @@ RULES = {
     "Meal": {"warning": 31, "timeout": 35},
 }
 
+def get_rules_for_chat(chat_title):
+    if "[CASHIER]" in chat_title:
+        return {
+            "Toilet": {"warning": 10, "timeout": 15},
+            "Smoke": {"warning": 6, "timeout": 8},
+            "Meal": {"warning": 31, "timeout": 35},
+        }
+
+    return {
+        "Toilet": {"warning": 10, "timeout": 15},
+        "Smoke": {"warning": 6, "timeout": 8},
+        "Meal": {"warning": 41, "timeout": 45},
+    }
+
 
 ROLE_LEVELS = {
     "user": 1,
@@ -278,13 +292,14 @@ def delete_non_admin_noise(message):
         print("Delete message error:", e)
 
 
-def get_status(action_type, duration_minutes):
-    rule = RULES[action_type]
+def get_status(chat_title, action_type, duration_minutes):
+    rules = get_rules_for_chat(chat_title)
+    rule = rules[action_type]
 
-    if duration_minutes > rule["timeout"]:
+    if duration_minutes >= rule["timeout"]:
         return "Timeout"
 
-    if duration_minutes > rule["warning"]:
+    if duration_minutes >= rule["warning"]:
         return "Warning"
 
     return "Normal"
@@ -692,7 +707,7 @@ def end_action(chat, user, action_type):
             (in_time - record["out_time"]).total_seconds() / 60
         )
 
-        status = get_status(action_type, duration_minutes)
+        status = get_status(chat.title or "", action_type, duration_minutes)
 
         conn, cur = get_db_cursor()
 
@@ -721,16 +736,18 @@ def end_action(chat, user, action_type):
 
         warning_text = ""
 
+        rules = get_rules_for_chat(chat.title or "")
+
         if status == "Warning":
             warning_text = (
-                f"\n⚠️ {action_type} exceeded "
-                f"{RULES[action_type]['warning']} minutes."
+                f"\n⚠️ {action_type} reached "
+                f"{rules[action_type]['warning']} minutes."
             )
 
         if status == "Timeout":
             warning_text = (
-                f"\n🚨 {action_type} exceeded "
-                f"{RULES[action_type]['timeout']} minutes."
+                f"\n🚨 {action_type} reached "
+                f"{rules[action_type]['timeout']} minutes."
             )
 
         bot.send_message(
