@@ -8,8 +8,11 @@ import telebot
 from telebot import types
 
 from database import get_db
-from sync_to_sheet import sync_staff_to_sheet, sync_record_to_sheet
-
+from sync_to_sheet import (
+    sync_staff_to_sheet,
+    sync_record_to_sheet,
+    sync_monthly_summary_to_sheet
+)
 
 subprocess.run(["python", "init_db.py"], check=False)
 
@@ -128,6 +131,9 @@ def get_register_example(chat_title):
 
     if "[NPR77]" in chat_title:
         return "/register NPR001 Cat"
+    
+    if "[NPL11]" in chat_title:
+        return "/register NPL001 Cat"
 
     if "[CASHIER]" in chat_title:
         return "/register C001 Cat"
@@ -152,6 +158,9 @@ def is_valid_staff_id(chat_title, staff_id):
 
     if "[NPR77]" in chat_title:
         return staff_id.startswith("NPR")
+    
+    if "[NPL11]" in chat_title:
+        return staff_id.startswith("NPL")
 
     if "[CASHIER]" in chat_title:
         return staff_id.startswith("C")
@@ -310,7 +319,6 @@ def send_menu(message, company_id=None, telegram_id=None):
         resize_keyboard=True,
         one_time_keyboard=False,
         is_persistent=True,
-        selective=True,
         row_width=2
     )
 
@@ -1356,6 +1364,34 @@ def report_by_date(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
+def auto_sheet_sync_loop():
+    while True:
+        try:
+            conn, cur = get_db_cursor()
+
+            cur.execute("""
+                SELECT chat_title
+                FROM companies
+            """)
+
+            companies = cur.fetchall()
+
+            cur.close()
+            conn.close()
+
+            for company in companies:
+                try:
+                    sync_monthly_summary_to_sheet(company["chat_title"])
+                    print(f"Monthly summary synced: {company['chat_title']}")
+                except Exception as e:
+                    print("Monthly summary error:", e)
+
+            time.sleep(300)
+
+        except Exception as e:
+            print("Auto sheet sync error:", e)
+            time.sleep(60)
+
 
 def auto_daily_report_loop():
     last_sent_date = None
@@ -1517,6 +1553,11 @@ def handle_buttons(message):
 
 
 print("Bot is running...")
+
+threading.Thread(
+    target=auto_sheet_sync_loop,
+    daemon=True
+).start()
 
 threading.Thread(
     target=auto_daily_report_loop,
