@@ -273,9 +273,10 @@ def sync_record_to_sheet(chat_title, record_id):
             [values]
         )
     else:
+        current_row_count = worksheet.row_count
         worksheet.append_row(values)
 
-        new_row_number = len(worksheet.col_values(10))
+        new_row_number = current_row_count + 1
 
         cur.execute(
             """
@@ -303,12 +304,6 @@ def sync_monthly_summary_to_sheet(chat_title):
 
     if not spreadsheet:
         return
-
-    today = today_kh()
-    start_date, end_date, tab_name = get_cycle_period(today)
-
-    start_datetime = datetime.combine(start_date, time.min)
-    end_datetime = datetime.combine(end_date, time.max)
 
     conn = get_db()
     cur = conn.cursor()
@@ -338,21 +333,73 @@ def sync_monthly_summary_to_sheet(chat_title):
             name,
             type,
             duration,
-            status
+            status,
+            out_time
         FROM break_records
         WHERE company_id = %s
-        AND out_time >= %s
-        AND out_time <= %s
         AND status != 'Open'
-        ORDER BY staff_id
+        ORDER BY out_time, staff_id, name
         """,
-        (company_id, start_datetime, end_datetime)
+        (company_id,)
     )
 
     records = cur.fetchall()
 
     cur.close()
     conn.close()
+
+    if not records:
+        return
+
+    grouped = {}
+
+    for row in records:
+        _, _, tab_name = get_cycle_period(row["out_time"].date())
+
+        if tab_name not in grouped:
+            grouped[tab_name] = {}
+
+        key = f"{row['staff_id']}|{row['name']}"
+
+        if key not in grouped[tab_name]:
+            grouped[tab_name][key] = {
+                "staff_id": row["staff_id"],
+                "name": row["name"],
+                "Toilet Total": 0,
+                "Toilet Times": 0,
+                "Smoke Total": 0,
+                "Smoke Times": 0,
+                "Meal Total": 0,
+                "Meal Times": 0,
+                "Warning Times": 0,
+                "Timeout Times": 0,
+                "Cancelled Times": 0,
+            }
+
+        action_type = row["type"]
+        duration = row["duration"] or 0
+        status = row["status"]
+
+        if action_type == "Toilet":
+            grouped[tab_name][key]["Toilet Total"] += duration
+            grouped[tab_name][key]["Toilet Times"] += 1
+
+        if action_type == "Smoke":
+            grouped[tab_name][key]["Smoke Total"] += duration
+            grouped[tab_name][key]["Smoke Times"] += 1
+
+        if action_type == "Meal":
+            grouped[tab_name][key]["Meal Total"] += duration
+            grouped[tab_name][key]["Meal Times"] += 1
+
+        if status == "Warning":
+            grouped[tab_name][key]["Warning Times"] += 1
+
+        if status == "Timeout":
+            grouped[tab_name][key]["Timeout Times"] += 1
+
+        if status == "Cancelled":
+            grouped[tab_name][key]["Cancelled Times"] += 1
 
     headers = [
         "Staff ID",
@@ -368,75 +415,34 @@ def sync_monthly_summary_to_sheet(chat_title):
         "Cancelled Times"
     ]
 
-    summary_tab = f"Summary {tab_name}"
+    for tab_name, summary in grouped.items():
+        summary_tab = f"Summary {tab_name}"
 
-    worksheet = get_or_create_sheet(spreadsheet, summary_tab, headers)
+        worksheet = get_or_create_sheet(spreadsheet, summary_tab, headers)
 
-    worksheet.clear()
-    worksheet.append_row(headers)
+        worksheet.clear()
+        worksheet.append_row(headers)
 
-    summary = {}
+        values = []
 
-    for row in records:
-        staff_id = row["staff_id"]
-        name = row["name"]
-        action_type = row["type"]
-        duration = row["duration"] or 0
-        status = row["status"]
+        for key in sorted(summary.keys()):
+            data = summary[key]
 
-        if staff_id not in summary:
-            summary[staff_id] = {
-                "name": name,
-                "Toilet Total": 0,
-                "Toilet Times": 0,
-                "Smoke Total": 0,
-                "Smoke Times": 0,
-                "Meal Total": 0,
-                "Meal Times": 0,
-                "Warning Times": 0,
-                "Timeout Times": 0,
-                "Cancelled Times": 0,
-            }
+            values.append([
+                data["staff_id"],
+                data["name"],
+                data["Toilet Total"],
+                data["Toilet Times"],
+                data["Smoke Total"],
+                data["Smoke Times"],
+                data["Meal Total"],
+                data["Meal Times"],
+                data["Warning Times"],
+                data["Timeout Times"],
+                data["Cancelled Times"],
+            ])
 
-        if action_type == "Toilet":
-            summary[staff_id]["Toilet Total"] += duration
-            summary[staff_id]["Toilet Times"] += 1
+        if values:
+            worksheet.append_rows(values)
 
-        if action_type == "Smoke":
-            summary[staff_id]["Smoke Total"] += duration
-            summary[staff_id]["Smoke Times"] += 1
-
-        if action_type == "Meal":
-            summary[staff_id]["Meal Total"] += duration
-            summary[staff_id]["Meal Times"] += 1
-
-        if status == "Warning":
-            summary[staff_id]["Warning Times"] += 1
-
-        if status == "Timeout":
-            summary[staff_id]["Timeout Times"] += 1
-
-        if status == "Cancelled":
-            summary[staff_id]["Cancelled Times"] += 1
-
-    values = []
-
-    for staff_id, data in summary.items():
-        values.append([
-            staff_id,
-            data["name"],
-            data["Toilet Total"],
-            data["Toilet Times"],
-            data["Smoke Total"],
-            data["Smoke Times"],
-            data["Meal Total"],
-            data["Meal Times"],
-            data["Warning Times"],
-            data["Timeout Times"],
-            data["Cancelled Times"],
-        ])
-
-    if values:
-        worksheet.append_rows(values)
-
-    print(f"Monthly summary synced for {chat_title}")
+    print(f"All monthly summaries synced for {chat_title}")
