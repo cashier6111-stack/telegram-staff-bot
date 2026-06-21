@@ -273,10 +273,11 @@ def sync_record_to_sheet(chat_title, record_id):
             [values]
         )
     else:
-        current_row_count = worksheet.row_count
-        worksheet.append_row(values)
+        response = worksheet.append_row(values)
 
-        new_row_number = current_row_count + 1
+        updated_range = response["updates"]["updatedRange"]
+        row_part = updated_range.split("!")[1].split(":")[0]
+        new_row_number = int(row_part[1:])
 
         cur.execute(
             """
