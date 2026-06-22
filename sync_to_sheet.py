@@ -267,11 +267,42 @@ def sync_record_to_sheet(chat_title, record_id):
         row["id"]
     ]
 
+    target_row = None
+
     if row["sheet_row_number"]:
+        try:
+            check_value = worksheet.acell(f"J{row['sheet_row_number']}").value
+
+            if str(check_value) == str(row["id"]):
+                target_row = row["sheet_row_number"]
+        except Exception:
+            target_row = None
+
+    if not target_row:
+        try:
+            cell = worksheet.find(str(row["id"]))
+            if cell:
+                target_row = cell.row
+        except Exception:
+            target_row = None
+
+    if target_row:
         worksheet.update(
-            f"A{row['sheet_row_number']}:J{row['sheet_row_number']}",
+            f"A{target_row}:J{target_row}",
             [values]
         )
+
+        cur.execute(
+            """
+            UPDATE break_records
+            SET sheet_row_number = %s
+            WHERE id = %s
+            """,
+            (target_row, record_id)
+        )
+
+        conn.commit()
+
     else:
         response = worksheet.append_row(values)
 
