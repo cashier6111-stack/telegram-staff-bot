@@ -18,7 +18,7 @@ subprocess.run(["python", "init_db.py"], check=False)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-bot = telebot.TeleBot(TOKEN, threaded=False)
+bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=4)
 bot.remove_webhook()
 
 bot.set_my_commands([
@@ -110,10 +110,25 @@ def safe_sync_staff(chat):
 
 
 def safe_sync_record(chat, record_id):
+    """Mark a record for background Google Sheet sync.
+
+    Telegram replies are never blocked by Google API calls.
+    """
     try:
-        sync_record_to_sheet(chat.title or str(chat.id), record_id)
+        conn, cur = get_db_cursor()
+        cur.execute(
+            """
+            UPDATE break_records
+            SET needs_sheet_sync = TRUE
+            WHERE id = %s
+            """,
+            (record_id,)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
-        print("Google Sheet record sync error:", e)
+        print("Mark sheet sync error:", e)
 
 
 def get_register_example(chat_title):
@@ -711,8 +726,8 @@ def end_action(chat, user, action_type):
 
         in_time = now_kh()
 
-        duration_minutes = round(
-            (in_time - record["out_time"]).total_seconds() / 60
+        duration_minutes = int(
+            (in_time - record["out_time"]).total_seconds() // 60
         )
 
         status = get_status(chat.title or "", action_type, duration_minutes)
@@ -799,8 +814,8 @@ def cancel_last(chat, user):
 
         cancel_time = now_kh()
 
-        duration_minutes = round(
-            (cancel_time - record["out_time"]).total_seconds() / 60
+        duration_minutes = int(
+            (cancel_time - record["out_time"]).total_seconds() // 60
         )
 
         conn, cur = get_db_cursor()
@@ -1245,7 +1260,7 @@ def build_daily_report(company_id, target_date):
 
     cur.execute(
         """
-        SELECT name, type, duration, status
+        SELECT staff_id, name, type, duration, status
         FROM break_records
         WHERE company_id = %s
         AND out_time >= %s
@@ -1267,13 +1282,17 @@ def build_daily_report(company_id, target_date):
     summary = {}
 
     for row in records:
+        staff_id = row["staff_id"]
         name = row["name"]
+        identity_key = (staff_id, name)
         action_type = row["type"]
         duration = row["duration"] or 0
         status = row["status"]
 
-        if name not in summary:
-            summary[name] = {
+        if identity_key not in summary:
+            summary[identity_key] = {
+                "Staff ID": staff_id,
+                "Name": name,
                 "Toilet": 0,
                 "Smoke": 0,
                 "Meal": 0,
@@ -1285,24 +1304,28 @@ def build_daily_report(company_id, target_date):
                 "Timeout Count": 0,
             }
 
-        if action_type in ["Toilet", "Smoke", "Meal"]:
-            summary[name][action_type] += duration
-            summary[name][f"{action_type} Count"] += 1
+        if (
+            status != "Cancelled"
+            and action_type in ["Toilet", "Smoke", "Meal"]
+        ):
+            summary[identity_key][action_type] += duration
+            summary[identity_key][f"{action_type} Count"] += 1
 
         if status == "Cancelled":
-            summary[name]["Cancelled Count"] += 1
+            summary[identity_key]["Cancelled Count"] += 1
 
         if status == "Warning":
-            summary[name]["Warning Count"] += 1
+            summary[identity_key]["Warning Count"] += 1
 
         if status == "Timeout":
-            summary[name]["Timeout Count"] += 1
+            summary[identity_key]["Timeout Count"] += 1
 
     report = f"📊 Daily Report {target_date.strftime('%Y-%m-%d')}\n\n"
 
-    for name, data in summary.items():
+    for _, data in sorted(summary.items()):
         report += (
-            f"👤 {name}\n"
+            f"🆔 {data['Staff ID']}\n"
+            f"👤 {data['Name']}\n"
             f"🚻 Toilet: {data['Toilet']} min / {data['Toilet Count']} times\n"
             f"🚬 Smoke: {data['Smoke']} min / {data['Smoke Count']} times\n"
             f"🍱 Meal: {data['Meal']} min / {data['Meal Count']} times\n"
@@ -1364,33 +1387,113 @@ def report_by_date(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
+
 def auto_sheet_sync_loop():
+    """Sync pending attendance records every five minutes.
+
+    Database remains the source of truth. Google quota errors do not stop the bot.
+    """
     while True:
         try:
             conn, cur = get_db_cursor()
+            cur.execute(
+                """
+                SELECT br.id, c.chat_title
+                FROM break_records br
+                JOIN companies c ON c.id = br.company_id
+                WHERE br.needs_sheet_sync = TRUE
+                AND c.chat_title IN (
+                    '[8MBET] Attendance',
+                    '[MJ88] Attendance',
+                    '[ESEWA12] Attendance',
+                    '[MAGAR33] Attendance',
+                    '[NPR77] Attendance',
+                    '[NPL11] Attendance',
+                    '[CASHIER] Attendance'
+                )
+                ORDER BY br.id
+                LIMIT 200
+                """
+            )
+            pending = cur.fetchall()
+            cur.close()
+            conn.close()
 
-            cur.execute("""
+            for item in pending:
+                try:
+                    success = sync_record_to_sheet(
+                        item["chat_title"],
+                        item["id"]
+                    )
+                    if success:
+                        conn, cur = get_db_cursor()
+                        cur.execute(
+                            """
+                            UPDATE break_records
+                            SET needs_sheet_sync = FALSE
+                            WHERE id = %s
+                            """,
+                            (item["id"],)
+                        )
+                        conn.commit()
+                        cur.close()
+                        conn.close()
+                    time.sleep(0.15)
+                except Exception as e:
+                    print(f"Pending record sync error {item['id']}:", e)
+                    if "429" in str(e):
+                        time.sleep(65)
+                        break
+
+        except Exception as e:
+            print("Auto sheet sync loop error:", e)
+
+        time.sleep(300)
+
+
+def auto_summary_sync_loop():
+    """Refresh active-cycle summaries every 6 hours without blocking the bot."""
+    time.sleep(120)
+
+    while True:
+        try:
+            conn, cur = get_db_cursor()
+            cur.execute(
+                """
                 SELECT chat_title
                 FROM companies
-            """)
-
+                WHERE chat_title IN (
+                    '[8MBET] Attendance',
+                    '[MJ88] Attendance',
+                    '[ESEWA12] Attendance',
+                    '[MAGAR33] Attendance',
+                    '[NPR77] Attendance',
+                    '[NPL11] Attendance',
+                    '[CASHIER] Attendance'
+                )
+                ORDER BY id
+                """
+            )
             companies = cur.fetchall()
-
             cur.close()
             conn.close()
 
             for company in companies:
                 try:
-                    sync_monthly_summary_to_sheet(company["chat_title"])
-                    print(f"Monthly summary synced: {company['chat_title']}")
+                    sync_monthly_summary_to_sheet(
+                        company["chat_title"],
+                        all_periods=False
+                    )
+                    time.sleep(1)
                 except Exception as e:
                     print("Monthly summary error:", e)
-
-            time.sleep(300)
-
+                    if "429" in str(e):
+                        time.sleep(65)
+                        break
         except Exception as e:
-            print("Auto sheet sync error:", e)
-            time.sleep(60)
+            print("Auto summary loop error:", e)
+
+        time.sleep(21600)
 
 
 def auto_daily_report_loop():
@@ -1415,6 +1518,15 @@ def auto_daily_report_loop():
                         """
                         SELECT id, chat_title, telegram_chat_id
                         FROM companies
+                        WHERE chat_title IN (
+                            '[8MBET] Attendance',
+                            '[MJ88] Attendance',
+                            '[ESEWA12] Attendance',
+                            '[MAGAR33] Attendance',
+                            '[NPR77] Attendance',
+                            '[NPL11] Attendance',
+                            '[CASHIER] Attendance'
+                        )
                         """
                     )
 
@@ -1556,6 +1668,11 @@ print("Bot is running...")
 
 threading.Thread(
     target=auto_sheet_sync_loop,
+    daemon=True
+).start()
+
+threading.Thread(
+    target=auto_summary_sync_loop,
     daemon=True
 ).start()
 

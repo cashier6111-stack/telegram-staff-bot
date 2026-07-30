@@ -56,55 +56,19 @@ def init_db():
         status TEXT NOT NULL DEFAULT 'Open'
             CHECK (status IN ('Open', 'Normal', 'Warning', 'Timeout', 'Cancelled')),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        sheet_row_number INTEGER
+        sheet_row_number INTEGER,
+        needs_sheet_sync BOOLEAN NOT NULL DEFAULT FALSE
     );
     """)
 
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS name TEXT;
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS real_name TEXT;
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS username TEXT;
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active';
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    """)
-
-    cur.execute("""
-    ALTER TABLE staff
-    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-    """)
-
-    cur.execute("""
-    ALTER TABLE break_records
-    ADD COLUMN IF NOT EXISTS sheet_row_number INTEGER;
-    """)
+    cur.execute("ALTER TABLE break_records ADD COLUMN IF NOT EXISTS sheet_row_number INTEGER;")
+    cur.execute("ALTER TABLE break_records ADD COLUMN IF NOT EXISTS needs_sheet_sync BOOLEAN NOT NULL DEFAULT FALSE;")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_break_records_pending_sync ON break_records (needs_sheet_sync, id);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_break_records_company_out_time ON break_records (company_id, out_time);")
 
     conn.commit()
-
     cur.close()
     conn.close()
-
     print("Database ready.")
 
 
