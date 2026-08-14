@@ -11,14 +11,15 @@ from database import get_db
 from sync_to_sheet import (
     sync_staff_to_sheet,
     sync_record_to_sheet,
-    sync_monthly_summary_to_sheet
+    sync_monthly_summary_to_sheet,
+    safe_resync_period_to_sheet
 )
 
 subprocess.run(["python", "init_db.py"], check=False)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=4)
+bot = telebot.TeleBot(TOKEN, threaded=False)
 bot.remove_webhook()
 
 bot.set_my_commands([
@@ -36,6 +37,9 @@ time.sleep(3)
 KH_TZ = timezone(timedelta(hours=7))
 
 FIRST_ADMIN_ID = 8439975606
+
+# Only one heavy Google Sheet resync may run at a time.
+RESYNC_LOCK = threading.Lock()
 
 
 RULES = {
@@ -110,25 +114,10 @@ def safe_sync_staff(chat):
 
 
 def safe_sync_record(chat, record_id):
-    """Mark a record for background Google Sheet sync.
-
-    Telegram replies are never blocked by Google API calls.
-    """
     try:
-        conn, cur = get_db_cursor()
-        cur.execute(
-            """
-            UPDATE break_records
-            SET needs_sheet_sync = TRUE
-            WHERE id = %s
-            """,
-            (record_id,)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        sync_record_to_sheet(chat.title or str(chat.id), record_id)
     except Exception as e:
-        print("Mark sheet sync error:", e)
+        print("Google Sheet record sync error:", e)
 
 
 def get_register_example(chat_title):
@@ -248,6 +237,7 @@ VALID_COMMANDS = [
     "/register",
     "/today",
     "/report",
+    "/resyncperiod",
     "/liststaff",
     "/editstaff",
     "/removestaff",
@@ -726,8 +716,8 @@ def end_action(chat, user, action_type):
 
         in_time = now_kh()
 
-        duration_minutes = int(
-            (in_time - record["out_time"]).total_seconds() // 60
+        duration_minutes = round(
+            (in_time - record["out_time"]).total_seconds() / 60
         )
 
         status = get_status(chat.title or "", action_type, duration_minutes)
@@ -814,8 +804,8 @@ def cancel_last(chat, user):
 
         cancel_time = now_kh()
 
-        duration_minutes = int(
-            (cancel_time - record["out_time"]).total_seconds() // 60
+        duration_minutes = round(
+            (cancel_time - record["out_time"]).total_seconds() / 60
         )
 
         conn, cur = get_db_cursor()
@@ -1260,7 +1250,7 @@ def build_daily_report(company_id, target_date):
 
     cur.execute(
         """
-        SELECT staff_id, name, type, duration, status
+        SELECT name, type, duration, status
         FROM break_records
         WHERE company_id = %s
         AND out_time >= %s
@@ -1282,17 +1272,13 @@ def build_daily_report(company_id, target_date):
     summary = {}
 
     for row in records:
-        staff_id = row["staff_id"]
         name = row["name"]
-        identity_key = (staff_id, name)
         action_type = row["type"]
         duration = row["duration"] or 0
         status = row["status"]
 
-        if identity_key not in summary:
-            summary[identity_key] = {
-                "Staff ID": staff_id,
-                "Name": name,
+        if name not in summary:
+            summary[name] = {
                 "Toilet": 0,
                 "Smoke": 0,
                 "Meal": 0,
@@ -1304,28 +1290,24 @@ def build_daily_report(company_id, target_date):
                 "Timeout Count": 0,
             }
 
-        if (
-            status != "Cancelled"
-            and action_type in ["Toilet", "Smoke", "Meal"]
-        ):
-            summary[identity_key][action_type] += duration
-            summary[identity_key][f"{action_type} Count"] += 1
+        if action_type in ["Toilet", "Smoke", "Meal"]:
+            summary[name][action_type] += duration
+            summary[name][f"{action_type} Count"] += 1
 
         if status == "Cancelled":
-            summary[identity_key]["Cancelled Count"] += 1
+            summary[name]["Cancelled Count"] += 1
 
         if status == "Warning":
-            summary[identity_key]["Warning Count"] += 1
+            summary[name]["Warning Count"] += 1
 
         if status == "Timeout":
-            summary[identity_key]["Timeout Count"] += 1
+            summary[name]["Timeout Count"] += 1
 
     report = f"📊 Daily Report {target_date.strftime('%Y-%m-%d')}\n\n"
 
-    for _, data in sorted(summary.items()):
+    for name, data in summary.items():
         report += (
-            f"🆔 {data['Staff ID']}\n"
-            f"👤 {data['Name']}\n"
+            f"👤 {name}\n"
             f"🚻 Toilet: {data['Toilet']} min / {data['Toilet Count']} times\n"
             f"🚬 Smoke: {data['Smoke']} min / {data['Smoke Count']} times\n"
             f"🍱 Meal: {data['Meal']} min / {data['Meal Count']} times\n"
@@ -1388,112 +1370,150 @@ def report_by_date(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
-def auto_sheet_sync_loop():
-    """Sync pending attendance records every five minutes.
 
-    Database remains the source of truth. Google quota errors do not stop the bot.
-    """
-    while True:
+def run_resync_period_task(
+    chat_id,
+    chat_title,
+    start_date,
+    end_date
+):
+    try:
+        result = safe_resync_period_to_sheet(
+            chat_title,
+            start_date,
+            end_date
+        )
+
+        bot.send_message(
+            chat_id,
+            "✅ Resync completed\n\n"
+            f"Period: {start_date} → {end_date}\n"
+            f"Total: {result['total']}\n"
+            f"Synced: {result['synced']}\n"
+            f"Failed: {result['failed']}"
+        )
+
+    except Exception as e:
+        print("Background resync error:", e)
+
         try:
-            conn, cur = get_db_cursor()
-            cur.execute(
-                """
-                SELECT br.id, c.chat_title
-                FROM break_records br
-                JOIN companies c ON c.id = br.company_id
-                WHERE br.needs_sheet_sync = TRUE
-                AND c.chat_title IN (
-                    '[8MBET] Attendance',
-                    '[MJ88] Attendance',
-                    '[ESEWA12] Attendance',
-                    '[MAGAR33] Attendance',
-                    '[NPR77] Attendance',
-                    '[NPL11] Attendance',
-                    '[CASHIER] Attendance'
-                )
-                ORDER BY br.id
-                LIMIT 200
-                """
+            bot.send_message(
+                chat_id,
+                f"❌ Resync failed:\n{e}"
             )
-            pending = cur.fetchall()
-            cur.close()
-            conn.close()
+        except Exception:
+            pass
 
-            for item in pending:
-                try:
-                    success = sync_record_to_sheet(
-                        item["chat_title"],
-                        item["id"]
-                    )
-                    if success:
-                        conn, cur = get_db_cursor()
-                        cur.execute(
-                            """
-                            UPDATE break_records
-                            SET needs_sheet_sync = FALSE
-                            WHERE id = %s
-                            """,
-                            (item["id"],)
-                        )
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                    time.sleep(0.15)
-                except Exception as e:
-                    print(f"Pending record sync error {item['id']}:", e)
-                    if "429" in str(e):
-                        time.sleep(65)
-                        break
-
-        except Exception as e:
-            print("Auto sheet sync loop error:", e)
-
-        time.sleep(300)
+    finally:
+        if RESYNC_LOCK.locked():
+            try:
+                RESYNC_LOCK.release()
+            except RuntimeError:
+                pass
 
 
-def auto_summary_sync_loop():
-    """Refresh active-cycle summaries every 6 hours without blocking the bot."""
-    time.sleep(120)
+@bot.message_handler(commands=["resyncperiod"])
+def resync_period_command(message):
+    try:
+        company_id = get_or_create_company(message.chat)
 
-    while True:
+        if not has_role(
+            company_id,
+            message.from_user.id,
+            "admin"
+        ):
+            bot.reply_to(
+                message,
+                "❌ Admin only."
+            )
+            return
+
+        parts = message.text.split()
+
+        if len(parts) != 3:
+            bot.reply_to(
+                message,
+                "Usage:\n"
+                "/resyncperiod YYYY-MM-DD YYYY-MM-DD\n\n"
+                "Example:\n"
+                "/resyncperiod 2026-07-21 2026-08-20"
+            )
+            return
+
+        start_date = parts[1]
+        end_date = parts[2]
+
+        start_dt = datetime.strptime(
+            start_date,
+            "%Y-%m-%d"
+        )
+        end_dt = datetime.strptime(
+            end_date,
+            "%Y-%m-%d"
+        )
+
+        if end_dt < start_dt:
+            bot.reply_to(
+                message,
+                "❌ End date cannot be earlier than start date."
+            )
+            return
+
+        # Prevent accidental multi-month/multi-year heavy jobs.
+        if (end_dt - start_dt).days > 62:
+            bot.reply_to(
+                message,
+                "❌ Maximum resync range is 63 days."
+            )
+            return
+
+        if not RESYNC_LOCK.acquire(blocking=False):
+            bot.reply_to(
+                message,
+                "⏳ Another resync is already running.\n"
+                "Please wait until it finishes."
+            )
+            return
+
+        chat_title = (
+            message.chat.title
+            or str(message.chat.id)
+        )
+
+        bot.reply_to(
+            message,
+            "🔄 Resync started in background.\n\n"
+            f"Period: {start_date} → {end_date}\n"
+            "You can continue using the attendance bot.\n"
+            "Only one resync can run at a time."
+        )
+
         try:
-            conn, cur = get_db_cursor()
-            cur.execute(
-                """
-                SELECT chat_title
-                FROM companies
-                WHERE chat_title IN (
-                    '[8MBET] Attendance',
-                    '[MJ88] Attendance',
-                    '[ESEWA12] Attendance',
-                    '[MAGAR33] Attendance',
-                    '[NPR77] Attendance',
-                    '[NPL11] Attendance',
-                    '[CASHIER] Attendance'
-                )
-                ORDER BY id
-                """
-            )
-            companies = cur.fetchall()
-            cur.close()
-            conn.close()
+            threading.Thread(
+                target=run_resync_period_task,
+                args=(
+                    message.chat.id,
+                    chat_title,
+                    start_date,
+                    end_date
+                ),
+                daemon=True
+            ).start()
+        except Exception:
+            RESYNC_LOCK.release()
+            raise
 
-            for company in companies:
-                try:
-                    sync_monthly_summary_to_sheet(
-                        company["chat_title"],
-                        all_periods=False
-                    )
-                    time.sleep(1)
-                except Exception as e:
-                    print("Monthly summary error:", e)
-                    if "429" in str(e):
-                        time.sleep(65)
-                        break
-        except Exception as e:
-            print("Auto summary loop error:", e)
+    except ValueError:
+        bot.reply_to(
+            message,
+            "❌ Date format must be YYYY-MM-DD."
+        )
 
-        time.sleep(21600)
+    except Exception as e:
+        bot.reply_to(
+            message,
+            f"❌ Resync error: {e}"
+        )
 
 
 def auto_daily_report_loop():
@@ -1518,15 +1538,6 @@ def auto_daily_report_loop():
                         """
                         SELECT id, chat_title, telegram_chat_id
                         FROM companies
-                        WHERE chat_title IN (
-                            '[8MBET] Attendance',
-                            '[MJ88] Attendance',
-                            '[ESEWA12] Attendance',
-                            '[MAGAR33] Attendance',
-                            '[NPR77] Attendance',
-                            '[NPL11] Attendance',
-                            '[CASHIER] Attendance'
-                        )
                         """
                     )
 
@@ -1665,16 +1676,6 @@ def handle_buttons(message):
 
 
 print("Bot is running...")
-
-threading.Thread(
-    target=auto_sheet_sync_loop,
-    daemon=True
-).start()
-
-threading.Thread(
-    target=auto_summary_sync_loop,
-    daemon=True
-).start()
 
 threading.Thread(
     target=auto_daily_report_loop,
