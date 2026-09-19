@@ -12,7 +12,11 @@ from sync_to_sheet import (
     sync_staff_to_sheet,
     sync_record_to_sheet,
     sync_monthly_summary_to_sheet,
-    safe_resync_period_to_sheet
+    safe_resync_period_to_sheet,
+    sync_clock_record_to_sheet,
+    delete_break_records_permanently,
+    delete_clock_records_permanently,
+    clear_cashier_history
 )
 
 subprocess.run(["python", "init_db.py"], check=False)
@@ -26,6 +30,8 @@ bot.set_my_commands([
     types.BotCommand("start", "Open attendance menu"),
     types.BotCommand("menu", "Show shortcut buttons"),
     types.BotCommand("myid", "Get your Telegram ID"),
+    types.BotCommand("clockin", "Clock in for work"),
+    types.BotCommand("clockout", "Clock out from work"),
     types.BotCommand("today", "Show today report"),
     types.BotCommand("report", "Show report by date"),
 ])
@@ -40,6 +46,10 @@ FIRST_ADMIN_ID = 8439975606
 
 # Only one heavy Google Sheet resync may run at a time.
 RESYNC_LOCK = threading.Lock()
+# Destructive record deletion shares this lock with period resync.
+MAINTENANCE_LOCK = RESYNC_LOCK
+# While a full CASHIER wipe is running, block new CASHIER clock events.
+CASHIER_HISTORY_CLEARING = threading.Event()
 
 
 RULES = {
@@ -68,6 +78,14 @@ ROLE_LEVELS = {
     "leader": 2,
     "admin": 3,
 }
+
+
+def is_cashier_chat(chat_or_title):
+    if isinstance(chat_or_title, str):
+        title = chat_or_title
+    else:
+        title = getattr(chat_or_title, "title", None) or ""
+    return "[CASHIER]" in title
 
 
 def now_kh():
@@ -118,6 +136,16 @@ def safe_sync_record(chat, record_id):
         sync_record_to_sheet(chat.title or str(chat.id), record_id)
     except Exception as e:
         print("Google Sheet record sync error:", e)
+
+
+def safe_sync_clock_record(chat, clock_record_id):
+    try:
+        sync_clock_record_to_sheet(
+            chat.title or str(chat.id),
+            clock_record_id
+        )
+    except Exception as e:
+        print("Google Sheet clock sync error:", e)
 
 
 def get_register_example(chat_title):
@@ -238,6 +266,12 @@ VALID_COMMANDS = [
     "/today",
     "/report",
     "/resyncperiod",
+    "/deleteclock",
+    "/deleterecord",
+    "/deletestaff",
+    "/clearcashierhistory",
+    "/clockout",
+    "/clockin",
     "/liststaff",
     "/editstaff",
     "/removestaff",
@@ -251,6 +285,8 @@ VALID_COMMANDS = [
 VALID_BUTTONS = [
     "📝 How To Register",
     "🆔 My Telegram ID",
+    "🟢 Clock In",
+    "🔴 Clock Out",
     "🚻 Toilet Out",
     "✅ Toilet In",
     "🚬 Smoke Out",
@@ -334,28 +370,37 @@ def send_menu(message, company_id=None, telegram_id=None):
 
     markup.add(types.KeyboardButton("🆔 My Telegram ID"))
 
+    markup.add(
+        types.KeyboardButton("🟢 Clock In"),
+        types.KeyboardButton("🔴 Clock Out")
+    )
+
+    cashier_only = is_cashier_chat(message.chat)
+
     if role in ["user", "leader"]:
         markup.add(types.KeyboardButton("📝 How To Register"))
 
-        markup.add(
-            types.KeyboardButton("🚻 Toilet Out"),
-            types.KeyboardButton("✅ Toilet In")
-        )
+        if not cashier_only:
+            markup.add(
+                types.KeyboardButton("🚻 Toilet Out"),
+                types.KeyboardButton("✅ Toilet In")
+            )
 
-        markup.add(
-            types.KeyboardButton("🚬 Smoke Out"),
-            types.KeyboardButton("✅ Smoke In")
-        )
+            markup.add(
+                types.KeyboardButton("🚬 Smoke Out"),
+                types.KeyboardButton("✅ Smoke In")
+            )
 
-        markup.add(
-            types.KeyboardButton("🍱 Meal Out"),
-            types.KeyboardButton("✅ Meal In")
-        )
+            markup.add(
+                types.KeyboardButton("🍱 Meal Out"),
+                types.KeyboardButton("✅ Meal In")
+            )
 
-        markup.add(types.KeyboardButton("❌ Cancel Last"))
+            markup.add(types.KeyboardButton("❌ Cancel Last"))
 
     if role in ["leader", "admin"]:
-        markup.add(types.KeyboardButton("📊 Today Report"))
+        if not cashier_only:
+            markup.add(types.KeyboardButton("📊 Today Report"))
         markup.add(types.KeyboardButton("👥 List Staff"))
         markup.add(types.KeyboardButton("✏️ Edit Staff Help"))
         markup.add(types.KeyboardButton("❌ Remove Staff Help"))
@@ -433,6 +478,206 @@ def get_open_record(company_id, telegram_id, action_type=None):
     conn.close()
 
     return record
+
+
+
+def get_open_clock_record(company_id, telegram_id):
+    conn, cur = get_db_cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM attendance_records
+            WHERE company_id = %s
+            AND telegram_id = %s
+            AND status = 'Open'
+            ORDER BY clock_in DESC
+            LIMIT 1
+            """,
+            (company_id, telegram_id)
+        )
+        return cur.fetchone()
+    finally:
+        cur.close()
+        conn.close()
+
+
+def clock_in_user(chat, user):
+    try:
+        if is_cashier_chat(chat) and CASHIER_HISTORY_CLEARING.is_set():
+            bot.send_message(
+                chat.id,
+                "⏳ CASHIER history is being cleared. Clock In is temporarily disabled."
+            )
+            return
+
+        company_id = get_or_create_company(chat)
+        staff = find_staff(company_id, user.id)
+
+        if not staff:
+            bot.send_message(
+                chat.id,
+                "❌ Please register first before Clock In."
+            )
+            return
+
+        existing = get_open_clock_record(company_id, user.id)
+        if existing:
+            bot.send_message(
+                chat.id,
+                "❌ You are already Clocked In.\n"
+                f"Clock In: {format_time(existing['clock_in'])}"
+            )
+            return
+
+        # Non-CASHIER groups still keep Break and Clock state consistent.
+        # CASHIER is Clock-only, so legacy break rows must never block Clock In.
+        if not is_cashier_chat(chat):
+            open_break = get_open_record(company_id, user.id)
+            if open_break:
+                bot.send_message(
+                    chat.id,
+                    f"❌ You still have an open {open_break['type']} record.\n"
+                    "Please finish or cancel it first."
+                )
+                return
+
+        now = now_kh()
+        conn, cur = get_db_cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO attendance_records (
+                    company_id,
+                    telegram_id,
+                    staff_id,
+                    name,
+                    clock_in,
+                    status,
+                    created_at,
+                    needs_sheet_sync
+                )
+                VALUES (%s, %s, %s, %s, %s, 'Open', %s, TRUE)
+                RETURNING id
+                """,
+                (
+                    company_id,
+                    user.id,
+                    staff["staff_id"],
+                    staff["real_name"],
+                    now,
+                    now
+                )
+            )
+            record = cur.fetchone()
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+
+        # Google failure does not undo the PostgreSQL clock record.
+        safe_sync_clock_record(chat, record["id"])
+
+        bot.send_message(
+            chat.id,
+            "🟢 Clock In recorded\n"
+            f"👤 {staff['real_name']} ({staff['staff_id']})\n"
+            f"🕒 {format_time(now)}\n"
+            f"🆔 Clock Record ID: {record['id']}"
+        )
+
+    except Exception as e:
+        bot.send_message(chat.id, f"❌ Clock In error: {e}")
+
+
+def clock_out_user(chat, user):
+    try:
+        if is_cashier_chat(chat) and CASHIER_HISTORY_CLEARING.is_set():
+            bot.send_message(
+                chat.id,
+                "⏳ CASHIER history is being cleared. Clock Out is temporarily disabled."
+            )
+            return
+
+        company_id = get_or_create_company(chat)
+        staff = find_staff(company_id, user.id)
+
+        if not staff:
+            bot.send_message(
+                chat.id,
+                "❌ Please register first."
+            )
+            return
+
+        record = get_open_clock_record(company_id, user.id)
+        if not record:
+            bot.send_message(
+                chat.id,
+                "❌ No open Clock In record found."
+            )
+            return
+
+        # Non-CASHIER groups still require open Breaks to be closed first.
+        # CASHIER is Clock-only, so legacy break rows never block Clock Out.
+        if not is_cashier_chat(chat):
+            open_break = get_open_record(company_id, user.id)
+            if open_break:
+                bot.send_message(
+                    chat.id,
+                    f"❌ Please finish or cancel your open {open_break['type']} "
+                    "record before Clock Out."
+                )
+                return
+
+        now = now_kh()
+        duration_minutes = max(
+            0,
+            round((now - record["clock_in"]).total_seconds() / 60)
+        )
+
+        conn, cur = get_db_cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE attendance_records
+                SET clock_out = %s,
+                    duration_minutes = %s,
+                    status = 'Completed',
+                    needs_sheet_sync = TRUE
+                WHERE id = %s
+                """,
+                (now, duration_minutes, record["id"])
+            )
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+
+        safe_sync_clock_record(chat, record["id"])
+
+        hours, minutes = divmod(duration_minutes, 60)
+        bot.send_message(
+            chat.id,
+            "🔴 Clock Out recorded\n"
+            f"👤 {staff['real_name']} ({staff['staff_id']})\n"
+            f"🕒 {format_time(now)}\n"
+            f"⏱ Work time: {hours}h {minutes}m\n"
+            f"🆔 Clock Record ID: {record['id']}"
+        )
+
+    except Exception as e:
+        bot.send_message(chat.id, f"❌ Clock Out error: {e}")
+
+
+@bot.message_handler(commands=["clockin"])
+def clock_in_command(message):
+    clock_in_user(message.chat, message.from_user)
+
+
+@bot.message_handler(commands=["clockout"])
+def clock_out_command(message):
+    clock_out_user(message.chat, message.from_user)
+
 
 @bot.message_handler(commands=["start", "menu"])
 def show_menu(message):
@@ -611,6 +856,13 @@ def register(message):
 
 def start_action(chat, user, action_type):
     try:
+        if is_cashier_chat(chat):
+            bot.send_message(
+                chat.id,
+                "ℹ️ CASHIER only uses 🟢 Clock In / 🔴 Clock Out."
+            )
+            return
+
         company_id = get_or_create_company(chat)
 
         staff = find_staff(company_id, user.id)
@@ -690,6 +942,13 @@ def start_action(chat, user, action_type):
 
 def end_action(chat, user, action_type):
     try:
+        if is_cashier_chat(chat):
+            bot.send_message(
+                chat.id,
+                "ℹ️ CASHIER only uses 🟢 Clock In / 🔴 Clock Out."
+            )
+            return
+
         company_id = get_or_create_company(chat)
 
         staff = find_staff(company_id, user.id)
@@ -778,6 +1037,13 @@ def end_action(chat, user, action_type):
 
 def cancel_last(chat, user):
     try:
+        if is_cashier_chat(chat):
+            bot.send_message(
+                chat.id,
+                "ℹ️ CASHIER only uses 🟢 Clock In / 🔴 Clock Out."
+            )
+            return
+
         company_id = get_or_create_company(chat)
 
         staff = find_staff(company_id, user.id)
@@ -1057,6 +1323,320 @@ def remove_staff(message):
         bot.reply_to(message, f"❌ Error: {e}")
 
 
+
+
+# ============================================================
+# ADMIN: PERMANENT DELETE STAFF / RECORDS
+# ============================================================
+
+def _parse_id_tokens(text):
+    parts = text.replace(",", " ").split()[1:]
+    return [part.strip() for part in parts if part.strip()]
+
+
+@bot.message_handler(commands=["deletestaff"])
+def delete_staff_permanently(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        staff_ids = [x.upper() for x in _parse_id_tokens(message.text)]
+        staff_ids = list(dict.fromkeys(staff_ids))
+
+        if not staff_ids:
+            bot.reply_to(
+                message,
+                "Usage:\n/deletestaff STAFF_ID STAFF_ID ...\n\n"
+                "Example:\n/deletestaff 8M51 8M66 8M99"
+            )
+            return
+
+        if len(staff_ids) > 50:
+            bot.reply_to(message, "❌ Maximum 50 staff per command.")
+            return
+
+        conn, cur = get_db_cursor()
+        deleted = []
+        not_found = []
+        blocked = []
+
+        try:
+            for staff_id in staff_ids:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM staff
+                    WHERE company_id = %s
+                    AND staff_id = %s
+                    """,
+                    (company_id, staff_id)
+                )
+                staff = cur.fetchone()
+
+                if not staff:
+                    not_found.append(staff_id)
+                    continue
+
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM break_records
+                    WHERE company_id = %s
+                    AND telegram_id = %s
+                    AND status = 'Open'
+                    LIMIT 1
+                    """,
+                    (company_id, staff["telegram_id"])
+                )
+                open_break = cur.fetchone()
+
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM attendance_records
+                    WHERE company_id = %s
+                    AND telegram_id = %s
+                    AND status = 'Open'
+                    LIMIT 1
+                    """,
+                    (company_id, staff["telegram_id"])
+                )
+                open_clock = cur.fetchone()
+
+                if open_break or open_clock:
+                    reason = []
+                    if open_break:
+                        reason.append("open break")
+                    if open_clock:
+                        reason.append("open clock")
+                    blocked.append(f"{staff_id} ({', '.join(reason)})")
+                    continue
+
+                # Historical break/clock records are intentionally preserved.
+                cur.execute(
+                    """
+                    DELETE FROM roles
+                    WHERE company_id = %s
+                    AND telegram_id = %s
+                    """,
+                    (company_id, staff["telegram_id"])
+                )
+                cur.execute(
+                    """
+                    DELETE FROM staff
+                    WHERE company_id = %s
+                    AND staff_id = %s
+                    """,
+                    (company_id, staff_id)
+                )
+                deleted.append(staff_id)
+
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cur.close()
+            conn.close()
+
+        safe_sync_staff(message.chat)
+
+        text = "🗑 Permanent staff delete completed\n\n"
+        text += f"Deleted: {len(deleted)}\n"
+        if deleted:
+            text += "✅ " + ", ".join(deleted) + "\n"
+        text += f"Not found: {len(not_found)}\n"
+        if not_found:
+            text += "❓ " + ", ".join(not_found) + "\n"
+        text += f"Blocked: {len(blocked)}"
+        if blocked:
+            text += "\n⚠️ " + "\n⚠️ ".join(blocked)
+        text += "\n\nHistorical records were kept."
+
+        bot.reply_to(message, text)
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Permanent delete error: {e}")
+
+
+def _run_delete_break_records_task(chat_id, chat_title, company_id, record_ids):
+    try:
+        result = delete_break_records_permanently(
+            chat_title,
+            company_id,
+            record_ids
+        )
+        text = (
+            "🗑 Break record deletion completed\n\n"
+            f"Deleted: {len(result['deleted'])}\n"
+            f"Not found: {len(result['not_found'])}\n"
+            f"Failed: {len(result['failed'])}"
+        )
+        if result["deleted"]:
+            text += "\n\n✅ Deleted IDs: " + ", ".join(map(str, result["deleted"]))
+        if result["not_found"]:
+            text += "\n❓ Not found: " + ", ".join(map(str, result["not_found"]))
+        if result["failed"]:
+            text += "\n❌ Failed:\n" + "\n".join(
+                f"{rid}: {err}" for rid, err in result["failed"].items()
+            )
+        if result.get("summary_errors"):
+            text += "\n⚠️ Summary refresh warning:\n" + "\n".join(result["summary_errors"])
+        bot.send_message(chat_id, text)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Delete record error: {e}")
+    finally:
+        if MAINTENANCE_LOCK.locked():
+            try:
+                MAINTENANCE_LOCK.release()
+            except RuntimeError:
+                pass
+
+
+@bot.message_handler(commands=["deleterecord"])
+def delete_record_command(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        tokens = _parse_id_tokens(message.text)
+        if not tokens:
+            bot.reply_to(
+                message,
+                "Usage:\n/deleterecord RECORD_ID RECORD_ID ...\n\n"
+                "Example:\n/deleterecord 37551 37552 37553"
+            )
+            return
+
+        if len(tokens) > 50:
+            bot.reply_to(message, "❌ Maximum 50 records per command.")
+            return
+
+        try:
+            record_ids = list(dict.fromkeys(int(x) for x in tokens))
+        except ValueError:
+            bot.reply_to(message, "❌ Record IDs must be numbers.")
+            return
+
+        if not MAINTENANCE_LOCK.acquire(blocking=False):
+            bot.reply_to(
+                message,
+                "⏳ A resync/delete job is already running.\n"
+                "Please wait until it finishes."
+            )
+            return
+
+        chat_title = message.chat.title or str(message.chat.id)
+        bot.reply_to(
+            message,
+            f"🗑 Deleting {len(record_ids)} break record(s) in background..."
+        )
+
+        try:
+            threading.Thread(
+                target=_run_delete_break_records_task,
+                args=(message.chat.id, chat_title, company_id, record_ids),
+                daemon=True
+            ).start()
+        except Exception:
+            MAINTENANCE_LOCK.release()
+            raise
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Delete record error: {e}")
+
+
+def _run_delete_clock_records_task(chat_id, chat_title, company_id, record_ids):
+    try:
+        result = delete_clock_records_permanently(
+            chat_title,
+            company_id,
+            record_ids
+        )
+        text = (
+            "🗑 Clock record deletion completed\n\n"
+            f"Deleted: {len(result['deleted'])}\n"
+            f"Not found: {len(result['not_found'])}\n"
+            f"Failed: {len(result['failed'])}"
+        )
+        if result["deleted"]:
+            text += "\n\n✅ Deleted IDs: " + ", ".join(map(str, result["deleted"]))
+        if result["not_found"]:
+            text += "\n❓ Not found: " + ", ".join(map(str, result["not_found"]))
+        if result["failed"]:
+            text += "\n❌ Failed:\n" + "\n".join(
+                f"{rid}: {err}" for rid, err in result["failed"].items()
+            )
+        bot.send_message(chat_id, text)
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Delete clock error: {e}")
+    finally:
+        if MAINTENANCE_LOCK.locked():
+            try:
+                MAINTENANCE_LOCK.release()
+            except RuntimeError:
+                pass
+
+
+@bot.message_handler(commands=["deleteclock"])
+def delete_clock_command(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        tokens = _parse_id_tokens(message.text)
+        if not tokens:
+            bot.reply_to(
+                message,
+                "Usage:\n/deleteclock CLOCK_RECORD_ID CLOCK_RECORD_ID ...\n\n"
+                "Example:\n/deleteclock 101 102 103"
+            )
+            return
+
+        if len(tokens) > 50:
+            bot.reply_to(message, "❌ Maximum 50 clock records per command.")
+            return
+
+        try:
+            record_ids = list(dict.fromkeys(int(x) for x in tokens))
+        except ValueError:
+            bot.reply_to(message, "❌ Clock Record IDs must be numbers.")
+            return
+
+        if not MAINTENANCE_LOCK.acquire(blocking=False):
+            bot.reply_to(
+                message,
+                "⏳ A resync/delete job is already running.\n"
+                "Please wait until it finishes."
+            )
+            return
+
+        chat_title = message.chat.title or str(message.chat.id)
+        bot.reply_to(
+            message,
+            f"🗑 Deleting {len(record_ids)} Clock record(s) in background..."
+        )
+
+        try:
+            threading.Thread(
+                target=_run_delete_clock_records_task,
+                args=(message.chat.id, chat_title, company_id, record_ids),
+                daemon=True
+            ).start()
+        except Exception:
+            MAINTENANCE_LOCK.release()
+            raise
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ Delete clock error: {e}")
+
+
 @bot.message_handler(commands=["addleader"])
 def add_leader(message):
     try:
@@ -1322,6 +1902,13 @@ def build_daily_report(company_id, target_date):
 @bot.message_handler(commands=["today"])
 def today_report(message):
     try:
+        if is_cashier_chat(message.chat):
+            bot.reply_to(
+                message,
+                "ℹ️ CASHIER is Clock In / Clock Out only. Break report is disabled."
+            )
+            return
+
         company_id = get_or_create_company(message.chat)
 
         if not has_role(company_id, message.from_user.id, "leader"):
@@ -1339,6 +1926,13 @@ def today_report(message):
 @bot.message_handler(commands=["report"])
 def report_by_date(message):
     try:
+        if is_cashier_chat(message.chat):
+            bot.reply_to(
+                message,
+                "ℹ️ CASHIER is Clock In / Clock Out only. Break report is disabled."
+            )
+            return
+
         company_id = get_or_create_company(message.chat)
 
         if not has_role(company_id, message.from_user.id, "leader"):
@@ -1369,6 +1963,116 @@ def report_by_date(message):
     except Exception as e:
         bot.reply_to(message, f"❌ Error: {e}")
 
+
+
+
+def _run_clear_cashier_history_task(chat_id, chat_title):
+    try:
+        result = clear_cashier_history(chat_title)
+
+        if result["success"]:
+            bot.send_message(
+                chat_id,
+                "✅ CASHIER history cleared permanently\n\n"
+                f"Break records deleted: {result['break_deleted']}\n"
+                f"Clock records deleted: {result['clock_deleted']}\n"
+                f"Google Sheet history tabs deleted: "
+                f"{len(result['sheet_tabs_deleted'])}\n\n"
+                "✅ Staff registrations preserved\n"
+                "✅ Admin / Leader permissions preserved\n"
+                "✅ CASHIER now uses Clock In / Clock Out only"
+            )
+        else:
+            errors = "\n".join(
+                f"• {name}: {error}"
+                for name, error in result["sheet_errors"].items()
+            )
+            bot.send_message(
+                chat_id,
+                "❌ CASHIER history clear stopped before database deletion.\n\n"
+                "Some Google Sheet tabs could not be deleted.\n"
+                "Database history was preserved for safety.\n\n"
+                f"{errors[:2500]}"
+            )
+
+    except Exception as e:
+        print("CASHIER full history clear error:", e)
+        try:
+            bot.send_message(
+                chat_id,
+                f"❌ CASHIER history clear failed:\n{e}"
+            )
+        except Exception:
+            pass
+
+    finally:
+        CASHIER_HISTORY_CLEARING.clear()
+        if MAINTENANCE_LOCK.locked():
+            try:
+                MAINTENANCE_LOCK.release()
+            except RuntimeError:
+                pass
+
+
+@bot.message_handler(commands=["clearcashierhistory"])
+def clear_cashier_history_command(message):
+    try:
+        chat_title = message.chat.title or ""
+
+        if chat_title != "[CASHIER] Attendance":
+            bot.reply_to(
+                message,
+                "❌ This command can only be used inside [CASHIER] Attendance."
+            )
+            return
+
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        parts = message.text.split()
+        if len(parts) != 2 or parts[1].upper() != "CONFIRM":
+            bot.reply_to(
+                message,
+                "⚠️ This permanently deletes ALL CASHIER Break + Clock history.\n"
+                "Staff and permissions will be kept.\n\n"
+                "To continue, send exactly:\n"
+                "/clearcashierhistory CONFIRM"
+            )
+            return
+
+        if not MAINTENANCE_LOCK.acquire(blocking=False):
+            bot.reply_to(
+                message,
+                "⏳ Another resync/delete maintenance job is running.\n"
+                "Try again after it finishes."
+            )
+            return
+
+        CASHIER_HISTORY_CLEARING.set()
+
+        bot.reply_to(
+            message,
+            "🗑 CASHIER full history clear started.\n\n"
+            "Clock In / Clock Out is temporarily paused for CASHIER.\n"
+            "The bot will send a completion message when finished."
+        )
+
+        try:
+            threading.Thread(
+                target=_run_clear_cashier_history_task,
+                args=(message.chat.id, chat_title),
+                daemon=True
+            ).start()
+        except Exception:
+            CASHIER_HISTORY_CLEARING.clear()
+            MAINTENANCE_LOCK.release()
+            raise
+
+    except Exception as e:
+        bot.reply_to(message, f"❌ CASHIER clear error: {e}")
 
 
 def run_resync_period_task(
@@ -1415,6 +2119,13 @@ def run_resync_period_task(
 @bot.message_handler(commands=["resyncperiod"])
 def resync_period_command(message):
     try:
+        if is_cashier_chat(message.chat):
+            bot.reply_to(
+                message,
+                "ℹ️ CASHIER is Clock In / Clock Out only. Break resync is disabled."
+            )
+            return
+
         company_id = get_or_create_company(message.chat)
 
         if not has_role(
@@ -1548,6 +2259,9 @@ def auto_daily_report_loop():
 
                     for company in companies:
                         try:
+                            if is_cashier_chat(company["chat_title"]):
+                                continue
+
                             report = build_daily_report(
                                 company["id"],
                                 report_date
@@ -1591,6 +2305,12 @@ def handle_buttons(message):
             f"🆔 Your Telegram ID:\n{user.id}"
         )
 
+    elif text == "🟢 Clock In":
+        clock_in_user(chat, user)
+
+    elif text == "🔴 Clock Out":
+        clock_out_user(chat, user)
+
     elif text == "🚻 Toilet Out":
         start_action(chat, user, "Toilet")
 
@@ -1613,6 +2333,13 @@ def handle_buttons(message):
         cancel_last(chat, user)
 
     elif text == "📊 Today Report":
+        if is_cashier_chat(chat):
+            bot.send_message(
+                chat.id,
+                "ℹ️ CASHIER is Clock In / Clock Out only. Break report is disabled."
+            )
+            return
+
         company_id = get_or_create_company(chat)
 
         if not has_role(company_id, user.id, "leader"):
