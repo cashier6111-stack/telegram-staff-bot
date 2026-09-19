@@ -66,6 +66,36 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_break_records_pending_sync ON break_records (needs_sheet_sync, id);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_break_records_company_out_time ON break_records (company_id, out_time);")
 
+
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS attendance_records (
+        id SERIAL PRIMARY KEY,
+        company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+        telegram_id BIGINT NOT NULL,
+        staff_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        clock_in TIMESTAMP NOT NULL,
+        clock_out TIMESTAMP,
+        duration_minutes INTEGER,
+        status TEXT NOT NULL DEFAULT 'Open'
+            CHECK (status IN ('Open', 'Completed')),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        sheet_row_number INTEGER,
+        needs_sheet_sync BOOLEAN NOT NULL DEFAULT FALSE
+    );
+    """)
+
+    cur.execute("ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS sheet_row_number INTEGER;")
+    cur.execute("ALTER TABLE attendance_records ADD COLUMN IF NOT EXISTS needs_sheet_sync BOOLEAN NOT NULL DEFAULT FALSE;")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_attendance_records_company_clock_in ON attendance_records (company_id, clock_in);")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_attendance_records_pending_sync ON attendance_records (needs_sheet_sync, id);")
+    cur.execute("""
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_one_open_per_user
+    ON attendance_records (company_id, telegram_id)
+    WHERE status = 'Open';
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
