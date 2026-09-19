@@ -5,7 +5,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 import gspread
-from gspread.exceptions import CellNotFound, WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound
 from google.oauth2.service_account import Credentials
 
 from database import get_db
@@ -877,12 +877,9 @@ CLOCK_HEADERS = [
 
 
 def _find_row_strict(worksheet, record_id, column_number):
-    """Find an ID in a specific column without swallowing API failures."""
-    try:
-        cell = worksheet.find(str(record_id), in_column=column_number)
-        return cell.row if cell else None
-    except CellNotFound:
-        return None
+    """Find an ID in a specific column. Modern gspread returns None when not found."""
+    cell = worksheet.find(str(record_id), in_column=column_number)
+    return cell.row if cell else None
 
 
 def _clock_tab_name(clock_in):
