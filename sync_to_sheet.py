@@ -146,54 +146,64 @@ def get_or_create_sheet(
     return worksheet
 
 def sync_staff_to_sheet(chat_title):
+    """
+    Safely rebuild the Staff worksheet from PostgreSQL.
+
+    Important safety behavior:
+    - Never clear the Staff worksheet before the replacement data is ready.
+    - Write the new complete dataset first.
+    - Only after that succeeds, clear surplus old rows below the new data.
+
+    This prevents a temporary Google 429/503 between clear() and append_rows()
+    from leaving the Staff worksheet completely blank.
+    """
     spreadsheet = open_company_spreadsheet(chat_title)
 
     if not spreadsheet:
-        return
+        return 0
 
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT id
-        FROM companies
-        WHERE chat_title = %s
-        """,
-        (chat_title,)
-    )
+    try:
+        cur.execute(
+            """
+            SELECT id
+            FROM companies
+            WHERE chat_title = %s
+            """,
+            (chat_title,)
+        )
 
-    company = cur.fetchone()
+        company = cur.fetchone()
 
-    if not company:
+        if not company:
+            return 0
+
+        company_id = company["id"]
+
+        cur.execute(
+            """
+            SELECT
+                telegram_id,
+                staff_id,
+                real_name,
+                username,
+                status,
+                is_active,
+                created_at,
+                updated_at
+            FROM staff
+            WHERE company_id = %s
+            ORDER BY staff_id
+            """,
+            (company_id,)
+        )
+
+        staff_rows = cur.fetchall()
+    finally:
         cur.close()
         conn.close()
-        return
-
-    company_id = company["id"]
-
-    cur.execute(
-        """
-        SELECT
-            telegram_id,
-            staff_id,
-            real_name,
-            username,
-            status,
-            is_active,
-            created_at,
-            updated_at
-        FROM staff
-        WHERE company_id = %s
-        ORDER BY staff_id
-        """,
-        (company_id,)
-    )
-
-    staff_rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
 
     headers = [
         "Telegram ID",
@@ -206,12 +216,13 @@ def sync_staff_to_sheet(chat_title):
         "Updated At"
     ]
 
-    worksheet = get_or_create_sheet(spreadsheet, "Staff", headers)
+    worksheet = get_or_create_sheet(
+        spreadsheet,
+        "Staff",
+        headers
+    )
 
-    worksheet.clear()
-    worksheet.append_row(headers)
-
-    values = []
+    values = [headers]
 
     for row in staff_rows:
         values.append([
@@ -225,10 +236,34 @@ def sync_staff_to_sheet(chat_title):
             format_time(row["updated_at"])
         ])
 
-    if values:
-        worksheet.append_rows(values)
+    # Write the complete replacement first. If Google rejects this request,
+    # the previous Staff data remains untouched instead of being blanked.
+    last_new_row = len(values)
+    worksheet.update(
+        f"A1:H{last_new_row}",
+        values,
+        value_input_option="USER_ENTERED"
+    )
 
-    print(f"Staff synced for {chat_title}")
+    # Only after the replacement succeeds, remove any stale rows left from a
+    # previous larger staff list. Failure here may leave stale rows, but never
+    # erases the newly written staff data.
+    try:
+        if worksheet.row_count > last_new_row:
+            worksheet.batch_clear([
+                f"A{last_new_row + 1}:H{worksheet.row_count}"
+            ])
+    except Exception as e:
+        print(
+            f"Staff trailing-row cleanup warning for {chat_title}:",
+            e
+        )
+
+    print(
+        f"Staff synced for {chat_title}: {len(staff_rows)} records"
+    )
+
+    return len(staff_rows)
 
 
 def _extract_appended_row_number(response):

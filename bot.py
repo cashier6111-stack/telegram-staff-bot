@@ -273,6 +273,7 @@ VALID_COMMANDS = [
     "/clockout",
     "/clockin",
     "/liststaff",
+    "/syncstaff",
     "/editstaff",
     "/removestaff",
     "/addleader",
@@ -1108,6 +1109,37 @@ def cancel_last(chat, user):
 
     except Exception as e:
         bot.send_message(chat.id, f"❌ Error: {e}")
+
+
+@bot.message_handler(commands=["syncstaff"])
+def sync_staff_command(message):
+    try:
+        company_id = get_or_create_company(message.chat)
+
+        if not has_role(company_id, message.from_user.id, "admin"):
+            bot.reply_to(message, "❌ Admin only.")
+            return
+
+        chat_title = message.chat.title or str(message.chat.id)
+
+        bot.reply_to(
+            message,
+            "🔄 Rebuilding Staff from PostgreSQL..."
+        )
+
+        count = sync_staff_to_sheet(chat_title)
+
+        bot.send_message(
+            message.chat.id,
+            "✅ Staff sheet rebuilt\n\n"
+            f"Staff records synced: {count}"
+        )
+
+    except Exception as e:
+        bot.reply_to(
+            message,
+            f"❌ Staff sync error: {e}"
+        )
 
 
 @bot.message_handler(commands=["liststaff"])
@@ -1971,6 +2003,19 @@ def _run_clear_cashier_history_task(chat_id, chat_title):
         result = clear_cashier_history(chat_title)
 
         if result["success"]:
+            staff_sync_note = ""
+            try:
+                staff_count = sync_staff_to_sheet(chat_title)
+                staff_sync_note = (
+                    f"\n✅ Staff sheet restored: {staff_count} records"
+                )
+            except Exception as staff_error:
+                print("CASHIER Staff restore warning:", staff_error)
+                staff_sync_note = (
+                    "\n⚠️ History was cleared, but Staff sheet refresh failed. "
+                    "Run /syncstaff after Google Sheets recovers."
+                )
+
             bot.send_message(
                 chat_id,
                 "✅ CASHIER history cleared permanently\n\n"
@@ -1981,6 +2026,7 @@ def _run_clear_cashier_history_task(chat_id, chat_title):
                 "✅ Staff registrations preserved\n"
                 "✅ Admin / Leader permissions preserved\n"
                 "✅ CASHIER now uses Clock In / Clock Out only"
+                f"{staff_sync_note}"
             )
         else:
             errors = "\n".join(
